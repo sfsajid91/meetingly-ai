@@ -344,6 +344,7 @@ pub struct SettingsView {
     pub providers: Vec<ProviderView>,
     pub transcriber_id: Option<String>,
     pub brain_id: Option<String>,
+    pub shortcut_conflicts: Vec<String>,
     /// Set when the settings file is from a newer build and changes cannot be saved.
     pub read_only_reason: Option<String>,
 }
@@ -391,6 +392,7 @@ pub struct SettingsStore {
 
 struct State {
     settings: Settings,
+    shortcut_conflicts: Vec<String>,
     read_only_reason: Option<String>,
 }
 
@@ -432,7 +434,19 @@ impl SettingsStore {
                 (Settings::default(), None)
             }
         };
-        Ok(Self { file, secrets, state: Mutex::new(State { settings, read_only_reason }) })
+        Ok(Self {
+            file,
+            secrets,
+            state: Mutex::new(State {
+                settings,
+                shortcut_conflicts: Vec::new(),
+                read_only_reason,
+            }),
+        })
+    }
+
+    pub fn set_shortcut_conflicts(&self, conflicts: Vec<String>) {
+        self.lock().shortcut_conflicts = conflicts;
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -476,6 +490,7 @@ impl SettingsStore {
                 .collect(),
             transcriber_id: s.transcriber_id.clone(),
             brain_id: s.brain_id.clone(),
+            shortcut_conflicts: state.shortcut_conflicts.clone(),
             read_only_reason: state.read_only_reason.clone(),
         }
     }
