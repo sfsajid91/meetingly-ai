@@ -19,7 +19,7 @@ const external = [
 export default defineConfig({
   plugins: [
     react(),
-    electron({
+    ...(process.env.TAURI_ENV_PLATFORM ? [] : [electron({
       main: {
         // The speech worker is its own entry: it runs in an Electron utility process.
         entry: { main: "electron/main.ts", "asr-worker": "electron/asr-worker.ts" },
@@ -29,7 +29,7 @@ export default defineConfig({
         input: "electron/preload.ts",
         vite: { build: { outDir: "dist-electron", rolldownOptions: { external } } }
       }
-    })
+    })])
   ],
   base: "./",
   build: { outDir: "dist", emptyOutDir: true },
