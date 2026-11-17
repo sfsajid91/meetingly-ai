@@ -24,3 +24,6 @@ tauri = { version = "2.12.6", features = [] }
 cpal = "0.16"
 hound = "3.5"
 nnnoiseless = { version = "0.5", default-features = false }
+# Default "v1" feature: Secret Service (zbus) on Linux, Keychain on macOS, Credential Manager on Windows; no plaintext fallback.
+keyring = "4.2"
+uuid = { version = "1", features = ["v4"] }
