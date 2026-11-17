@@ -4,8 +4,10 @@ mod llm;
 mod meetings;
 mod migration;
 mod secrets;
+mod session;
 mod settings;
 mod storage;
+mod transcript_files;
 
 use audio::{AudioDevices, AudioManager, AudioPaths};
 use llm::{LlmClient, ProviderTestResult};
