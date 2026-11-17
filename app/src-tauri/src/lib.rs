@@ -1,4 +1,6 @@
 mod audio;
+mod deepgram;
+mod llm;
 mod meetings;
 mod migration;
 mod secrets;
@@ -6,8 +8,10 @@ mod settings;
 mod storage;
 
 use audio::{AudioDevices, AudioManager, AudioPaths};
+use llm::{LlmClient, ProviderTestResult};
 use meetings::{Meeting, MeetingStore};
-use settings::{ProviderInput, ProviderRole, SettingsPatch, SettingsStore, SettingsView};
+use serde::Deserialize;
+use settings::{ProviderInput, ProviderKind, ProviderRole, SettingsPatch, SettingsStore, SettingsView};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -95,10 +99,69 @@ fn provider_select(
   Ok(changed(&app, &store))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderModelsInput {
+  id: Option<String>,
+  endpoint: String,
+  key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderTestInput {
+  id: Option<String>,
+  kind: ProviderKind,
+  endpoint: String,
+  model: String,
+  key: Option<String>,
+  language: Option<String>,
+}
+
+async fn resolve_provider_key(store: Settings, id: Option<String>, typed_key: Option<String>) -> Result<Option<String>, String> {
+  if let Some(k) = typed_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
+    return Ok(Some(k));
+  }
+  if let Some(id) = id {
+    return blocking(move || store.provider_key(&id)).await;
+  }
+  Ok(None)
+}
+
+#[tauri::command]
+async fn provider_models(
+  store: State<'_, Settings>,
+  llm: State<'_, LlmClient>,
+  input: ProviderModelsInput,
+) -> Result<Vec<String>, String> {
+  let key = resolve_provider_key(store.inner().clone(), input.id, input.key).await?;
+  llm.list_models(&input.endpoint, key.as_deref()).await
+}
+
+#[tauri::command]
+async fn provider_test(
+  store: State<'_, Settings>,
+  llm: State<'_, LlmClient>,
+  input: ProviderTestInput,
+) -> Result<ProviderTestResult, String> {
+  let key = resolve_provider_key(store.inner().clone(), input.id, input.key).await?;
+  match input.kind {
+    ProviderKind::Deepgram => {
+      let Some(api_key) = key else {
+        return Err("Deepgram needs an API key.".into());
+      };
+      let lang = input.language.unwrap_or_else(|| store.get().audio_language);
+      Ok(deepgram::test_connection(&input.endpoint, &api_key, &input.model, &lang).await)
+    }
+    ProviderKind::OpenaiCompatible => Ok(llm.test_provider(&input.endpoint, key.as_deref(), &input.model).await),
+  }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
     .manage(AudioManager::new())
+    .manage(LlmClient::new())
     .setup(|app| {
       let dir = app.path().app_data_dir().map_err(|e| format!("Could not locate app data directory: {e}"))?;
       storage::ensure_private_dir(&dir)?;
@@ -124,7 +187,9 @@ pub fn run() {
       settings_update,
       provider_save,
       provider_remove,
-      provider_select
+      provider_select,
+      provider_models,
+      provider_test
     ])
     .run(tauri::generate_context!())
     .expect("error while building tauri application");
