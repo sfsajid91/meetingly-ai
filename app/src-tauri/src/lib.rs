@@ -1,9 +1,12 @@
 mod audio;
+mod meetings;
+mod migration;
 mod secrets;
 mod settings;
 mod storage;
 
 use audio::{AudioDevices, AudioManager, AudioPaths};
+use meetings::{Meeting, MeetingStore};
 use settings::{ProviderInput, ProviderRole, SettingsPatch, SettingsStore, SettingsView};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -40,6 +43,16 @@ fn changed(app: &AppHandle, store: &SettingsStore) -> SettingsView {
 /// Keychain access can block (D-Bus, unlock prompts), so it runs off the main thread.
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
   tauri::async_runtime::spawn_blocking(work).await.map_err(|e| format!("Background task failed: {e}"))?
+}
+
+#[tauri::command]
+fn meetings_list(meetings: State<'_, Arc<MeetingStore>>) -> Vec<Meeting> {
+  meetings.list()
+}
+
+#[tauri::command]
+fn migration_status(outcome: State<'_, migration::Outcome>) -> migration::Outcome {
+  outcome.inner().clone()
 }
 
 #[tauri::command]
@@ -90,13 +103,23 @@ pub fn run() {
       let dir = app.path().app_data_dir().map_err(|e| format!("Could not locate app data directory: {e}"))?;
       storage::ensure_private_dir(&dir)?;
       let store: Settings = Arc::new(SettingsStore::open(&dir, Arc::new(secrets::OsKeychain))?);
+      let meetings = Arc::new(MeetingStore::open(&dir)?);
+      let config = app.path().config_dir().map_err(|e| format!("Could not locate config directory: {e}"))?;
+      let outcome = migration::run(&migration::legacy_dir(&config), &dir, &store, &meetings);
+      if let migration::Outcome::Failed { error } = &outcome {
+        eprintln!("[migration] {error}");
+      }
       app.manage(store);
+      app.manage(meetings);
+      app.manage(outcome);
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
       audio_devices,
       audio_start,
       audio_stop,
+      meetings_list,
+      migration_status,
       settings_get,
       settings_update,
       provider_save,

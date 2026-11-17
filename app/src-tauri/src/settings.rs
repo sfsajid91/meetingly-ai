@@ -33,6 +33,15 @@ pub enum AutoAnswer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+pub enum AudioSource {
+    #[default]
+    Both,
+    Microphone,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum AnswerLength {
     Short,
     Medium,
@@ -182,10 +191,12 @@ pub struct Settings {
     pub schema_version: u32,
     pub output_language: String,
     pub audio_language: String,
+    pub audio_source: AudioSource,
     /// CPAL input device name; empty until chosen.
     pub microphone_id: String,
     /// PulseAudio/PipeWire monitor source name; empty until chosen.
     pub monitor_id: String,
+    pub denoise_mic: bool,
     pub auto_answer: AutoAnswer,
     pub answer_length: AnswerLength,
     pub suggestions: bool,
@@ -206,8 +217,10 @@ impl Default for Settings {
             schema_version: SCHEMA_VERSION,
             output_language: "en".into(),
             audio_language: "en".into(),
+            audio_source: AudioSource::Both,
             microphone_id: String::new(),
             monitor_id: String::new(),
+            denoise_mic: true,
             auto_answer: AutoAnswer::Questions,
             answer_length: AnswerLength::Auto,
             suggestions: false,
@@ -254,6 +267,15 @@ impl Settings {
     pub fn provider(&self, id: &str) -> Option<&ProviderRecord> {
         self.providers.iter().find(|p| p.id == id)
     }
+
+    pub fn active_prompt(&self) -> Prompt {
+        self.active_prompt_id
+            .as_ref()
+            .and_then(|id| self.prompts.iter().find(|p| &p.id == id))
+            .or_else(|| self.prompts.first())
+            .cloned()
+            .unwrap_or_else(Prompt::default_prompt)
+    }
 }
 
 /// A provider as the webview sees it: whether a key exists, never the key or its keychain reference.
@@ -274,8 +296,10 @@ pub struct ProviderView {
 pub struct SettingsView {
     pub output_language: String,
     pub audio_language: String,
+    pub audio_source: AudioSource,
     pub microphone_id: String,
     pub monitor_id: String,
+    pub denoise_mic: bool,
     pub auto_answer: AutoAnswer,
     pub answer_length: AnswerLength,
     pub suggestions: bool,
@@ -297,8 +321,10 @@ pub struct SettingsView {
 pub struct SettingsPatch {
     pub output_language: Option<String>,
     pub audio_language: Option<String>,
+    pub audio_source: Option<AudioSource>,
     pub microphone_id: Option<String>,
     pub monitor_id: Option<String>,
+    pub denoise_mic: Option<bool>,
     pub auto_answer: Option<AutoAnswer>,
     pub answer_length: Option<AnswerLength>,
     pub suggestions: Option<bool>,
@@ -390,8 +416,10 @@ impl SettingsStore {
         SettingsView {
             output_language: s.output_language.clone(),
             audio_language: s.audio_language.clone(),
+            audio_source: s.audio_source,
             microphone_id: s.microphone_id.clone(),
             monitor_id: s.monitor_id.clone(),
+            denoise_mic: s.denoise_mic,
             auto_answer: s.auto_answer,
             answer_length: s.answer_length,
             suggestions: s.suggestions,
@@ -433,6 +461,14 @@ impl SettingsStore {
         Ok(result)
     }
 
+    /// Replaces the whole document. Used by migration; not exposed to the webview.
+    pub fn replace(&self, settings: Settings) -> Result<(), String> {
+        self.commit(|current| {
+            *current = settings;
+            Ok(())
+        })
+    }
+
     pub fn update(&self, patch: SettingsPatch) -> Result<(), String> {
         self.commit(|s| {
             if let Some(v) = patch.output_language {
@@ -441,11 +477,17 @@ impl SettingsStore {
             if let Some(v) = patch.audio_language {
                 s.audio_language = v;
             }
+            if let Some(v) = patch.audio_source {
+                s.audio_source = v;
+            }
             if let Some(v) = patch.microphone_id {
                 s.microphone_id = v;
             }
             if let Some(v) = patch.monitor_id {
                 s.monitor_id = v;
+            }
+            if let Some(v) = patch.denoise_mic {
+                s.denoise_mic = v;
             }
             if let Some(v) = patch.auto_answer {
                 s.auto_answer = v;
