@@ -147,7 +147,8 @@ impl BrainBackend for LlmClient {
     }
 }
 
-pub type ScreenCapturer = Arc<dyn Fn() -> Result<CapturedScreen, String> + Send + Sync>;
+pub type CaptureFuture = Pin<Box<dyn Future<Output = Result<CapturedScreen, String>> + Send>>;
+pub type ScreenCapturer = Arc<dyn Fn() -> CaptureFuture + Send + Sync>;
 
 struct ActiveProbe {
     superseded: AtomicBool,
@@ -330,7 +331,7 @@ impl ChatService {
         (self.emit)(ChatEvent::Busy(true));
 
         let restore = (self.hide_for_capture)();
-        let shot_res = (self.capturer)();
+        let shot_res = (self.capturer)().await;
         restore();
 
         let result = match shot_res {
@@ -741,10 +742,9 @@ mod tests {
     use super::*;
     use crate::meetings::MeetingStore;
     use crate::secrets::MemorySecrets;
-    use crate::session::{CaptureConnector, ConnectFuture, SocketSender, TranscriptionConnector};
+    use crate::session::{CaptureConnector, ConnectFuture, TranscriptionConnector};
     use crate::settings::ProviderInput;
     use crate::storage::test_support::TempDir;
-    use tokio::sync::mpsc;
 
     struct DummyConnector;
     impl TranscriptionConnector for DummyConnector {
@@ -826,7 +826,7 @@ mod tests {
             settings.clone(),
             session,
             backend,
-            Arc::new(|| Ok(CapturedScreen { base64: "abc".into(), width: 100, height: 100, bytes: 3 })),
+            Arc::new(|| Box::pin(async { Ok(CapturedScreen { base64: "abc".into(), width: 100, height: 100, bytes: 3 }) })),
             || Box::new(|| {}),
             move |ev| ev_cb.lock().unwrap().push(ev),
         );

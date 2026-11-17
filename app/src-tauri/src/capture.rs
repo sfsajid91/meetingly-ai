@@ -20,18 +20,46 @@ pub struct CapturedScreen {
     pub bytes: usize,
 }
 
-pub fn capture_primary_display() -> Result<CapturedScreen, String> {
-    let monitors = xcap::Monitor::all().map_err(|e| format!("Screen capture failed: {e}"))?;
-    let primary = monitors
-        .iter()
-        .find(|m| m.is_primary().unwrap_or(false))
-        .or_else(|| monitors.first())
-        .ok_or_else(|| "No display found for screen capture.".to_string())?;
-    let rgba = primary.capture_image().map_err(|e| format!("Screen capture returned no image: {e}"))?;
-    if rgba.width() == 0 || rgba.height() == 0 {
-        return Err("Screen capture returned an empty image.".into());
-    }
-    encode_jpeg_under_limit(DynamicImage::ImageRgba8(rgba))
+#[cfg(target_os = "linux")]
+pub async fn capture_primary_display() -> Result<CapturedScreen, String> {
+    use ashpd::desktop::screenshot::Screenshot;
+
+    let request = Screenshot::request()
+        .interactive(false)
+        .modal(false)
+        .send()
+        .await
+        .map_err(|e| format!("Screen capture request failed: {e}"))?;
+    let response = request
+        .response()
+        .map_err(|e| format!("Screen capture was cancelled or denied: {e}"))?;
+    let url = url::Url::parse(response.uri().as_str()).map_err(|e| format!("Invalid screenshot URI: {e}"))?;
+    let path = url
+        .to_file_path()
+        .map_err(|()| format!("Screenshot URI is not a local file: {}", response.uri()))?;
+    let bytes = tokio::fs::read(&path).await.map_err(|e| format!("Could not read screenshot file: {e}"))?;
+    let _ = tokio::fs::remove_file(&path).await;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("Could not decode screenshot: {e}"))?;
+    encode_jpeg_under_limit(img)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn capture_primary_display() -> Result<CapturedScreen, String> {
+    tokio::task::spawn_blocking(|| {
+        let monitors = xcap::Monitor::all().map_err(|e| format!("Screen capture failed: {e}"))?;
+        let primary = monitors
+            .iter()
+            .find(|m| m.is_primary().unwrap_or(false))
+            .or_else(|| monitors.first())
+            .ok_or_else(|| "No display found for screen capture.".to_string())?;
+        let rgba = primary.capture_image().map_err(|e| format!("Screen capture returned no image: {e}"))?;
+        if rgba.width() == 0 || rgba.height() == 0 {
+            return Err("Screen capture returned an empty image.".into());
+        }
+        encode_jpeg_under_limit(DynamicImage::ImageRgba8(rgba))
+    })
+    .await
+    .map_err(|e| format!("Screen capture task failed: {e}"))?
 }
 
 pub fn encode_jpeg_under_limit(img: DynamicImage) -> Result<CapturedScreen, String> {
