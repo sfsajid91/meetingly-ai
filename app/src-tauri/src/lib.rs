@@ -1,12 +1,16 @@
 mod audio;
+mod capture;
+mod chat;
 mod deepgram;
 mod llm;
 mod meetings;
 mod migration;
+mod reports;
 mod secrets;
 mod session;
 mod settings;
 mod storage;
+mod suggestions;
 mod transcript_files;
 
 use audio::{AudioDevices, AudioManager, AudioPaths};

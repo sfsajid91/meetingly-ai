@@ -13,6 +13,39 @@ pub const LANGUAGE_CODES: &[&str] = &[
     "pt", "ro", "ru", "sk", "es", "sv", "tr", "uk", "vi",
 ];
 
+pub fn language_instruction(code: &str) -> &'static str {
+    match code {
+        "ar" => "Respond in Arabic (العربية).",
+        "bg" => "Respond in Bulgarian (Български).",
+        "zh" => "Respond in Chinese (中文).",
+        "hr" => "Respond in Croatian (Hrvatski).",
+        "cs" => "Respond in Czech (Čeština).",
+        "da" => "Respond in Danish (Dansk).",
+        "nl" => "Respond in Dutch (Nederlands).",
+        "et" => "Respond in Estonian (Eesti).",
+        "fi" => "Respond in Finnish (Suomi).",
+        "fr" => "Respond in French (Français).",
+        "de" => "Respond in German (Deutsch).",
+        "hi" => "Respond in Hindi (हिन्दी).",
+        "hu" => "Respond in Hungarian (Magyar).",
+        "it" => "Respond in Italian (Italiano).",
+        "ja" => "Respond in Japanese (日本語).",
+        "ko" => "Respond in Korean (한국어).",
+        "no" => "Respond in Norwegian Bokmål (Norsk).",
+        "pl" => "Respond in Polish (Polski).",
+        "pt" => "Respond in Portuguese (Português).",
+        "ro" => "Respond in Romanian (Română).",
+        "ru" => "Respond in Russian (Русский язык).",
+        "sk" => "Respond in Slovak (Slovenčina).",
+        "es" => "Respond in Spanish (Español).",
+        "sv" => "Respond in Swedish (Svenska).",
+        "tr" => "Respond in Turkish (Türkçe).",
+        "uk" => "Respond in Ukrainian (Українська).",
+        "vi" => "Respond in Vietnamese (Tiếng Việt).",
+        _ => "Respond in English.",
+    }
+}
+
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a real-time assistant for meetings and interviews. Give the actual answer to what was asked, the way a knowledgeable person would say it out loud.
 
 - Answer the question itself. Never coach or describe how to answer.
