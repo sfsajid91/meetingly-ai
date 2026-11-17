@@ -26,7 +26,6 @@ impl std::fmt::Display for SecretError {
 pub trait SecretStore: Send + Sync {
     fn set(&self, account: &str, secret: &str) -> Result<(), SecretError>;
     /// `Ok(None)` when no secret is stored for `account`.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn get(&self, account: &str) -> Result<Option<String>, SecretError>;
     /// Deleting a missing secret succeeds.
     fn delete(&self, account: &str) -> Result<(), SecretError>;

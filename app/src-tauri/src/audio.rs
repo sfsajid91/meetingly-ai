@@ -552,15 +552,16 @@ where
                     block[len] = mono;
                     len += 1;
                     if len == BLOCK_SAMPLES {
+                        len = 0;
                         if sender.try_send(CaptureMessage::MicBlock(block, BLOCK_SAMPLES)).is_err() {
                             return;
                         }
-                        len = 0;
                     }
                 }
                 if len > 0 {
-                    let _ = sender.try_send(CaptureMessage::MicBlock(block, len));
+                    let tail = len;
                     len = 0;
+                    let _ = sender.try_send(CaptureMessage::MicBlock(block, tail));
                 }
             },
             on_error,

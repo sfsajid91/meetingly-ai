@@ -679,8 +679,6 @@ impl SettingsStore {
     }
 
     /// The API key for a provider, for Rust-side networking only. `Ok(None)` for keyless providers.
-    // Its caller is the provider networking step, which waits on the audio gate.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn provider_key(&self, id: &str) -> Result<Option<String>, String> {
         let record = self.get().provider(id).cloned().ok_or_else(|| "That provider no longer exists.".to_string())?;
         let Some(account) = record.key_ref else { return Ok(None) };

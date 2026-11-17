@@ -344,6 +344,7 @@ impl ChatService {
     }
 
     pub async fn screenshot(self: &Arc<Self>, prompt: Option<String>) -> Result<ScreenshotResult, String> {
+        let shot_id = new_id();
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if guard.busy {
@@ -356,6 +357,7 @@ impl ChatService {
                 }
             }
             guard.busy = true;
+            guard.active_id = Some(shot_id.clone());
         }
         (self.emit)(ChatEvent::Busy(true));
 
@@ -363,51 +365,73 @@ impl ChatService {
         let shot_res = (self.capturer)().await;
         restore();
 
-        let result = match shot_res {
-            Ok(shot) => match self.resolve_brain() {
-                Ok(brain) => {
-                    let sys = self.system_prompt();
-                    let ask = prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).unwrap_or_else(|| SCREENSHOT_PROMPT.into());
-                    let call = self.backend.vision(brain, shot.base64, ask, Some(sys));
-                    let handle = tokio::spawn(call);
-                    let abort = handle.abort_handle();
-                    {
-                        self.inner.lock().unwrap_or_else(|e| e.into_inner()).active_task = Some(abort);
-                    }
-                    match handle.await {
-                        Ok(Ok(res)) => {
-                            let display = if res.text.trim().is_empty() { "(no description)".into() } else { res.text.clone() };
-                            self.push_message(None, ChatRole::Assistant, ChatKind::Screenshot, display);
-                            Ok(ScreenshotResult {
-                                text: res.text,
-                                tokens: res.tokens,
-                                dimensions: format!("{}x{}", shot.width, shot.height),
-                            })
+        let still_active = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.active_id.as_deref() == Some(&shot_id)
+        };
+        let result = if !still_active {
+            Err("Screen analysis cancelled.".into())
+        } else {
+            match shot_res {
+                Ok(shot) => match self.resolve_brain() {
+                    Ok(brain) => {
+                        let sys = self.system_prompt();
+                        let ask = prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).unwrap_or_else(|| SCREENSHOT_PROMPT.into());
+                        let call = self.backend.vision(brain, shot.base64, ask, Some(sys));
+                        let handle = tokio::spawn(call);
+                        let abort = handle.abort_handle();
+                        {
+                            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                            if guard.active_id.as_deref() == Some(&shot_id) {
+                                guard.active_task = Some(abort);
+                            } else {
+                                abort.abort();
+                            }
                         }
-                        Ok(Err(err)) => {
-                            self.push_message(None, ChatRole::Assistant, ChatKind::Error, err.clone());
-                            Err(err)
+                        match handle.await {
+                            Ok(Ok(res)) => {
+                                let display = if res.text.trim().is_empty() { "(no description)".into() } else { res.text.clone() };
+                                self.push_message(None, ChatRole::Assistant, ChatKind::Screenshot, display);
+                                Ok(ScreenshotResult {
+                                    text: res.text,
+                                    tokens: res.tokens,
+                                    dimensions: format!("{}x{}", shot.width, shot.height),
+                                })
+                            }
+                            Ok(Err(err)) => {
+                                self.push_message(None, ChatRole::Assistant, ChatKind::Error, err.clone());
+                                Err(err)
+                            }
+                            Err(_) => Err("Screen analysis cancelled.".into()),
                         }
-                        Err(_) => Err("Screen analysis cancelled.".into()),
                     }
-                }
+                    Err(err) => {
+                        self.push_message(None, ChatRole::Assistant, ChatKind::Error, err.clone());
+                        Err(err)
+                    }
+                },
                 Err(err) => {
                     self.push_message(None, ChatRole::Assistant, ChatKind::Error, err.clone());
                     Err(err)
                 }
-            },
-            Err(err) => {
-                self.push_message(None, ChatRole::Assistant, ChatKind::Error, err.clone());
-                Err(err)
             }
         };
 
-        {
+        let clear_busy = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.active_task = None;
-            guard.busy = false;
+            if guard.active_id.as_deref() == Some(&shot_id) {
+                guard.active_task = None;
+                guard.active_id = None;
+                let was = guard.busy;
+                guard.busy = false;
+                was
+            } else {
+                false
+            }
+        };
+        if clear_busy {
+            (self.emit)(ChatEvent::Busy(false));
         }
-        (self.emit)(ChatEvent::Busy(false));
         self.trigger_drain();
         result
     }
