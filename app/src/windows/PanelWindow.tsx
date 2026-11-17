@@ -1,52 +1,68 @@
 import { useEffect, useRef, useState } from "react"
-import { Camera, Check, CircleHelp, Copy, Eraser, ExternalLink, FolderOpen, KeyRound, ListChecks, MessageSquareQuote, MessageSquareReply, Mic, PanelLeft, RefreshCw, SendHorizontal, Volume2, X } from "lucide-react"
+import {
+  Camera,
+  Check,
+  CircleHelp,
+  Copy,
+  Eraser,
+  FolderOpen,
+  ListChecks,
+  MessageSquareQuote,
+  MessageSquareReply,
+  Mic,
+  PanelLeft,
+  RefreshCw,
+  SendHorizontal,
+  Square,
+  Volume2,
+  X
+} from "lucide-react"
 import {
   ANSWER_LENGTHS,
   AUDIO_SOURCE_LABELS,
   AUTO_ANSWER_LABELS,
-  autoAnswerAllowed,
   LANGUAGES,
-  OWN_KEY_PRESETS,
   QUICK_ACTIONS,
+  hostOf,
   segmentLabel,
   suggestionsVisible,
   type AnswerLength,
+  type AudioDevices,
+  type AudioLevels,
   type AudioSource,
   type AutoAnswerMode,
   type ChatChunk,
   type ChatMessage,
   type LanguageCode,
-  type OwnKeyView,
   type PanelTab,
-  type PlanState,
   type QuickActionId,
+  type SettingsPatch,
   type SettingsView,
   type SuggestionsState
 } from "@shared/types"
 import { t } from "@shared/i18n"
-import { api, shortcutLabel } from "@/lib/api"
-import { useAudioCapture, useLiveTranscript, type Interim, type TranscriptLine } from "@/lib/capture"
-import { useCloudState, useEvent, usePlanState, useSessionState, useSettings, useSuggestions } from "@/lib/hooks"
-import { listAudioInputs, type AudioInputDevice, type AudioLevels } from "@/lib/audio"
+import { api, errorText, shortcutLabel } from "@/lib/api"
+import { useAudioLevels, useLiveTranscript, type Interim, type TranscriptLine } from "@/lib/capture"
+import { useAudioDevices, useEvent, useSessionState, useSettings, useSuggestions } from "@/lib/hooks"
 import { cn, copyText } from "@/lib/utils"
 import { markdownToPlain } from "@/lib/plain-text"
 import { Button } from "@/components/ui/button"
 import { Select, Toggle } from "@/components/ui/fields"
 import { Markdown } from "@/components/Markdown"
+import { MeetingsHistory, PromptsSettings, ProvidersSettings, ShortcutsSettings } from "@/components/SettingsPanels"
 
-/**
- * The panel attached under the toolbar: answers, the live transcript and settings as tabs, with
- * suggested questions on the left while listening. It also owns audio capture, which keeps
- * running on every tab and while hidden.
- */
+type SettingsSubTab = "general" | "providers" | "prompts" | "shortcuts" | "meetings"
+
+/** The panel attached under the toolbar: answers, live transcript, and local BYOK settings. */
 export function PanelWindow() {
   const session = useSessionState()
-  const [settings, update] = useSettings()
+  const [settings, update, setSettings] = useSettings()
   const [tab, setTab] = useState<PanelTab>("answers")
-  const capture = useAudioCapture(session)
+  const [settingsSubTab, setSettingsSubTab] = useState<SettingsSubTab>("general")
+  const levels = useAudioLevels(session)
   const transcript = useLiveTranscript(session)
   const suggestions = useSuggestions()
-  const plan = usePlanState()
+  const { devices, loading: devicesLoading, error: devicesError, refresh: refreshDevices } = useAudioDevices()
 
   useEffect(() => {
     void api.invoke("windows:state").then((s) => setTab(s.panelTab))
@@ -64,9 +80,13 @@ export function PanelWindow() {
     setTab(next)
     void api.invoke("panel:set-tab", next)
   }
-  // Hands-free answering needs Pro or Unlimited (or the user's own key); Free answers with the Answer button.
-  const autoAllowed = autoAnswerAllowed(plan)
-  const handsFree = autoAllowed && settings ? settings.autoAnswer !== "off" : false
+
+  const openProviders = () => {
+    setSettingsSubTab("providers")
+    choose("settings")
+  }
+
+  const handsFree = settings ? settings.autoAnswer !== "off" : false
   const rail = suggestionsVisible(settings, session.status)
   const dragToolbar = useDragToolbar()
 
@@ -94,19 +114,10 @@ export function PanelWindow() {
                 <PanelLeft className="h-3.5 w-3.5" />
               </Button>
             )}
-            {tab === "answers" && !autoAllowed ? (
+            {tab === "answers" ? (
               <button
                 type="button"
-                onClick={() => void api.invoke(plan.status === "signed-out" ? "cloud:link-start" : "plan:upgrade").catch(() => {})}
-                title={t("Lite and Pro answer questions from the meeting automatically. On Free, press Answer when a question is heard.")}
-                className="h-6 rounded-full px-2 text-[11px] font-medium text-white/55 transition-colors hover:bg-white/10 hover:text-white"
-              >
-                {t("Auto-answer")} <span className="ml-0.5 rounded bg-sky-500/20 px-1 text-[10px] text-sky-200">Lite</span>
-              </button>
-            ) : tab === "answers" ? (
-              <button
-                type="button"
-                onClick={() => update({ autoAnswer: handsFree ? "off" : "questions" })}
+                onClick={() => void update({ autoAnswer: handsFree ? "off" : "questions" })}
                 title={handsFree ? t("Questions heard in the meeting are answered automatically. Click to turn off.") : t("Click to answer questions from the meeting automatically.")}
                 className={cn(
                   "h-6 rounded-full px-2 text-[11px] font-medium transition-colors",
@@ -116,46 +127,72 @@ export function PanelWindow() {
                 {handsFree ? t("Auto-answer on") : t("Auto-answer off")}
               </button>
             ) : tab === "transcript" ? (
-              <Levels levels={capture.levels} />
+              <Levels levels={levels} />
             ) : null}
-            <Button variant="ghost" size="icon-sm" className="h-7 w-7" onClick={() => api.invoke("windows:hide", "chat")} title={t("Close (Esc)")}>
+            <Button variant="ghost" size="icon-sm" className="h-7 w-7" onClick={() => void api.invoke("windows:hide", "chat")} title={t("Close (Esc)")}>
               <X className="h-3.5 w-3.5" />
             </Button>
           </div>
         </header>
+
         {settings && settings.shortcutConflicts.length > 0 && (
           <div className="flex items-center gap-2 border-b border-amber-400/20 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-200">
             <span className="min-w-0 flex-1 truncate">
-              {t("Another app already uses {keys}. Pick other keys on the web dashboard.", { keys: settings.shortcutConflicts.map((a) => shortcutLabel(settings.shortcuts[a])).join(", ") })}
+              {t("Shortcut conflict:")} {settings.shortcutConflicts.map((a) => shortcutLabel(settings.shortcuts[a])).join(", ")}
             </span>
-            <button type="button" className="no-drag shrink-0 font-medium text-amber-100 hover:text-white" onClick={() => void api.invoke("cloud:open-web")}>
-              {t("Open")}
+            <button
+              type="button"
+              className="no-drag shrink-0 font-medium text-amber-100 hover:text-white"
+              onClick={() => {
+                setSettingsSubTab("shortcuts")
+                choose("settings")
+              }}
+            >
+              {t("Edit")}
             </button>
           </div>
         )}
+
         <div className="flex min-h-0 flex-1">
-          {rail && <Suggestions state={suggestions} plan={plan} onOff={() => void update({ suggestions: false })} />}
+          {rail && <Suggestions state={suggestions} onOff={() => void update({ suggestions: false })} />}
           <div className="flex min-w-0 flex-1 flex-col">
-            {/* Both tabs stay mounted: a reply keeps streaming and scroll positions survive tab switches. */}
             <div className={cn("min-h-0 flex-1 flex-col", tab === "answers" ? "flex" : "hidden")}>
-              <Answers listening={session.status !== "idle"} handsFree={handsFree} autoAllowed={autoAllowed} plan={plan} />
+              <Answers
+                listening={session.status !== "idle"}
+                handsFree={handsFree}
+                settings={settings}
+                onOpenProviders={openProviders}
+              />
             </div>
             <div className={cn("min-h-0 flex-1 flex-col", tab === "transcript" ? "flex" : "hidden")}>
               <Transcript
                 status={session.status}
                 connected={session.connected}
-                source={session.audioSource}
-                notice={capture.error ?? session.notice ?? capture.warnings[0] ?? null}
+                settings={settings}
+                devices={devices}
+                devicesLoading={devicesLoading}
+                devicesError={devicesError}
+                onRefreshDevices={() => void refreshDevices()}
+                notice={session.notice ?? null}
                 lines={transcript.lines}
                 interim={transcript.interim}
-                onSource={(s) => void update({ audioSource: s })}
-                deviceId={settings?.audioDeviceId ?? ""}
-                onDevice={(id) => void update({ audioDeviceId: id })}
-                suggestions={settings?.suggestions ?? false}
-                onSuggestions={(on) => void update({ suggestions: on })}
+                update={update}
+                onOpenProviders={openProviders}
               />
             </div>
-            {tab === "settings" && settings && <SettingsTab settings={settings} update={update} plan={plan} autoAllowed={autoAllowed} />}
+            {tab === "settings" && settings && (
+              <SettingsTab
+                settings={settings}
+                update={update}
+                onSettingsChange={setSettings}
+                subTab={settingsSubTab}
+                setSubTab={setSettingsSubTab}
+                devices={devices}
+                devicesLoading={devicesLoading}
+                devicesError={devicesError}
+                onRefreshDevices={() => void refreshDevices()}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -163,10 +200,6 @@ export function PanelWindow() {
   )
 }
 
-/**
- * The panel hangs under the toolbar and can't be moved on its own: dragging the header's empty space moves the
- * toolbar, and the panel follows. One move per animation frame; offsets are from where the pointer went down.
- */
 function useDragToolbar() {
   const drag = useRef<{ x: number; y: number; dx: number; dy: number; frame: number } | null>(null)
   const end = (e: React.PointerEvent<HTMLElement>) => {
@@ -221,8 +254,7 @@ const ACTION_ICONS: Record<QuickActionId, React.ReactNode> = {
   recap: <ListChecks className="h-3 w-3" />
 }
 
-/** Questions drawn from the conversation, then fixed quick actions; a click answers in the Answers tab. */
-function Suggestions({ state, plan, onOff }: { state: SuggestionsState; plan: PlanState; onOff: () => void }) {
+function Suggestions({ state, onOff }: { state: SuggestionsState; onOff: () => void }) {
   const [busy, setBusy] = useState(false)
   useEvent("chat:busy", setBusy)
   const use = (id: string) => void api.invoke("suggestions:use", id).catch(() => {})
@@ -252,13 +284,7 @@ function Suggestions({ state, plan, onOff }: { state: SuggestionsState; plan: Pl
       <div className="scroll min-h-0 flex-1 space-y-0.5 px-1 pb-1">
         {state.items.length === 0 ? (
           <p className="px-1.5 py-1 text-[11px] leading-snug text-white/35">
-            {plan.used && plan.limits && plan.used.listening >= plan.limits.listening
-              ? plan.plan === "unlimited"
-                ? t("Paused for today: the daily limit is used.")
-                : t("Paused for today: upgrade for more.")
-              : state.updating
-                ? t("Reading the conversation…")
-                : t("Questions show up here as the conversation goes.")}
+            {state.updating ? t("Reading the conversation…") : t("Questions show up here as the conversation goes.")}
           </p>
         ) : (
           state.items.map((s) => (
@@ -293,7 +319,17 @@ function Suggestions({ state, plan, onOff }: { state: SuggestionsState; plan: Pl
   )
 }
 
-function Answers({ listening, handsFree, autoAllowed, plan }: { listening: boolean; handsFree: boolean; autoAllowed: boolean; plan: PlanState }) {
+function Answers({
+  listening,
+  handsFree,
+  settings,
+  onOpenProviders
+}: {
+  listening: boolean
+  handsFree: boolean
+  settings: SettingsView | null
+  onOpenProviders: () => void
+}) {
   const [history, setHistory] = useState<ChatMessage[]>([])
   const [stream, setStream] = useState<ChatChunk | null>(null)
   const [busy, setBusy] = useState(false)
@@ -325,8 +361,11 @@ function Answers({ listening, handsFree, autoAllowed, plan }: { listening: boole
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
   }, [history.length, stream?.text.length])
 
+  const brain = settings?.providers.find((p) => p.id === settings.brainId) ?? null
+  const missingBrain = settings !== null && !brain
+
   const send = (text: string) => {
-    if (!text.trim() || busy) return
+    if (!text.trim() || busy || missingBrain) return
     setInput("")
     void api.invoke("chat:send", text)
     inputRef.current?.focus()
@@ -334,14 +373,21 @@ function Answers({ listening, handsFree, autoAllowed, plan }: { listening: boole
 
   return (
     <>
+      {missingBrain && (
+        <div className="flex items-center gap-2 border-b border-amber-400/20 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-100">
+          <span className="min-w-0 flex-1">Configure and select a brain provider to ask questions or get auto-answers.</span>
+          <Button size="sm" variant="secondary" className="h-6 px-2 text-[11px]" onClick={onOpenProviders}>
+            Configure
+          </Button>
+        </div>
+      )}
+
       <div ref={listRef} className="scroll min-h-0 flex-1 space-y-1.5 px-2.5 py-2">
         {history.length === 0 && !stream && (
           <p className="px-4 py-6 text-center text-[11.5px] leading-relaxed text-white/45">
             {handsFree
               ? t("Ask anything, or press Listen: questions from the meeting are answered here.")
-              : autoAllowed
-                ? t("Ask anything. Auto-answer is off.")
-                : t("Ask anything, or press Listen and then Answer when a question is heard.")}
+              : t("Ask anything. Auto-answer is off.")}
           </p>
         )}
         {history.map((m) => <Message key={m.id} message={m} />)}
@@ -360,13 +406,22 @@ function Answers({ listening, handsFree, autoAllowed, plan }: { listening: boole
             <span className="mr-1 text-white/35">{t("Heard")}</span>
             {heard}
           </span>
-          <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" disabled={busy} onClick={() => void api.invoke("chat:answer-last")} title={t("Answer the last thing heard")}>
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" disabled={busy || missingBrain} onClick={() => void api.invoke("chat:answer-last")} title={t("Answer the last thing heard")}>
             <MessageSquareReply className="h-3 w-3" /> {t("Answer")}
           </Button>
         </div>
       )}
 
-      <PlanBar plan={plan} />
+      {brain && (
+        <div className="flex items-center gap-1.5 border-t border-white/10 px-2.5 py-1 text-[10.5px] text-white/45">
+          <span className="min-w-0 flex-1 truncate">
+            {brain.label} · {brain.model} ({hostOf(brain.endpoint)})
+          </span>
+          <button type="button" className="font-medium text-sky-300 hover:text-sky-200" onClick={onOpenProviders}>
+            Providers
+          </button>
+        </div>
+      )}
 
       <form
         className="flex items-center gap-1 border-t border-white/10 p-1.5"
@@ -375,231 +430,34 @@ function Answers({ listening, handsFree, autoAllowed, plan }: { listening: boole
           send(input)
         }}
       >
-        <Button type="button" variant="ghost" size="icon-sm" title={t("Analyze my screen")} disabled={busy} onClick={() => void api.invoke("chat:screenshot").catch(() => {})}>
+        <Button type="button" variant="ghost" size="icon-sm" title={t("Analyze my screen")} disabled={busy || missingBrain} onClick={() => void api.invoke("chat:screenshot").catch(() => {})}>
           <Camera className="h-3.5 w-3.5" />
         </Button>
         <input
           ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          disabled={busy}
-          placeholder={busy ? t("Waiting for reply…") : t("Type a message")}
-          className="h-7 min-w-0 flex-1 rounded-md border border-white/[0.12] bg-white/5 px-2.5 text-[13px] text-white placeholder:text-white/35 focus:border-white/35 focus:outline-none"
+          disabled={busy || missingBrain}
+          placeholder={missingBrain ? "Select a brain provider first" : busy ? t("Waiting for reply…") : t("Type a message")}
+          className="h-7 min-w-0 flex-1 rounded-md border border-white/[0.12] bg-white/5 px-2.5 text-[13px] text-white placeholder:text-white/35 focus:border-white/35 focus:outline-none disabled:opacity-50"
         />
-        <Button type="button" variant="ghost" size="icon-sm" onClick={() => api.invoke("chat:clear")} title={t("Clear conversation")} disabled={history.length === 0}>
+        <Button type="button" variant="ghost" size="icon-sm" onClick={() => void api.invoke("chat:clear")} title={t("Clear conversation")} disabled={history.length === 0 && !busy}>
           <Eraser className="h-3.5 w-3.5" />
         </Button>
-        <Button type="submit" variant="primary" size="icon-sm" title={t("Send (Enter)")} disabled={busy || !input.trim()}>
-          <SendHorizontal className="h-3.5 w-3.5" />
-        </Button>
+        {busy ? (
+          <Button type="button" variant="danger" size="icon-sm" title="Stop reply" onClick={() => void api.invoke("chat:cancel")}>
+            <Square className="h-3 w-3" />
+          </Button>
+        ) : (
+          <Button type="submit" variant="primary" size="icon-sm" title={t("Send (Enter)")} disabled={missingBrain || !input.trim()}>
+            <SendHorizontal className="h-3.5 w-3.5" />
+          </Button>
+        )}
       </form>
     </>
   )
 }
 
-/**
- * The account line under the answers. Signed out: sign up or sign in happens in the browser, which links
- * this computer (the code shown here must match the one on the page). Free and Pro: answers left today.
- * Nothing on Unlimited. The own-key form opens from the tray menu ("Use your own API key…").
- */
-function PlanBar({ plan }: { plan: PlanState }) {
-  const cloud = useCloudState()
-  const [settings] = useSettings()
-  const [ownKeyForm, setOwnKeyForm] = useState(false)
-  // Opened from the tray; the pending flag covers a panel that wasn't loaded yet when the tray asked.
-  useEffect(() => {
-    void api.invoke("ownkey:pending").then((pending) => pending && setOwnKeyForm(true))
-  }, [])
-  useEvent("ownkey:open", () => {
-    setOwnKeyForm(true)
-    void api.invoke("ownkey:pending")
-  })
-  if (ownKeyForm) return <OwnKeyForm current={settings?.ownKey ?? null} onClose={() => setOwnKeyForm(false)} />
-  if (cloud.status === "linking" && cloud.code) {
-    return (
-      <div className="flex items-center gap-2 border-t border-white/10 bg-sky-500/10 px-2.5 py-1.5 text-[11.5px] text-sky-100">
-        <span className="min-w-0 flex-1 leading-snug">
-          {t("Confirm this code in your browser:")} <span className="selectable font-mono font-semibold tracking-[0.2em] text-white">{cloud.code}</span>
-        </span>
-        <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" onClick={() => void api.invoke("cloud:link-start").catch(() => {})}>
-          {t("Open the page again")}
-        </Button>
-        <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" onClick={() => void api.invoke("cloud:link-cancel")}>
-          {t("Cancel")}
-        </Button>
-      </div>
-    )
-  }
-  if (plan.status === "own-key" && settings?.ownKey) {
-    return (
-      <div className="flex items-center gap-1.5 border-t border-white/10 px-2.5 py-1 text-[11px] text-white/45">
-        <KeyRound className="h-3 w-3 shrink-0" />
-        <span className="min-w-0 flex-1 truncate" title={settings.ownKey.baseUrl}>
-          {t("Your own key: {model} at {host}", { model: settings.ownKey.model, host: hostOf(settings.ownKey.baseUrl) })}
-        </span>
-        <button type="button" className="font-medium text-sky-300 hover:text-sky-200" onClick={() => setOwnKeyForm(true)}>
-          {t("Change")}
-        </button>
-        <button type="button" className="font-medium text-white/55 hover:text-white" onClick={() => void api.invoke("ownkey:clear").catch(() => {})}>
-          {t("Stop using")}
-        </button>
-      </div>
-    )
-  }
-  if (plan.status === "signed-out") {
-    return (
-      <div className="border-t border-white/10 bg-sky-500/10 px-2.5 py-1.5">
-        <div className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 text-[11.5px] leading-snug text-sky-100">{t("Create a free account to get AI answers: 50 a day, no card.")}</span>
-          <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px] text-sky-100" onClick={() => void api.invoke("cloud:link-start").catch(() => {})}>
-            {t("Sign in")}
-          </Button>
-          <Button variant="primary" size="sm" className="h-6 px-2.5 text-[11px]" onClick={() => void api.invoke("cloud:link-start").catch(() => {})}>
-            {t("Sign up free")}
-          </Button>
-        </div>
-        {cloud.error && <p className="mt-1 text-[11px] text-amber-200">{cloud.error}</p>}
-      </div>
-    )
-  }
-  if (plan.status !== "ok" || plan.plan === "unlimited" || !plan.used || !plan.limits) return null
-  const left = Math.max(0, plan.limits.answers - plan.used.answers)
-  return (
-    <div className="flex items-center gap-1.5 border-t border-white/10 px-2.5 py-1 text-[11px] text-white/45">
-      <span className={cn("min-w-0 flex-1 truncate", left === 0 && "text-amber-200")}>
-        {left === 0 ? t("No answers left today. They come back at midnight UTC.") : t("{left} of {total} answers left today", { left, total: plan.limits.answers })}
-      </span>
-      <button type="button" className="font-medium text-sky-300 hover:text-sky-200" onClick={() => void api.invoke("plan:upgrade").catch(() => {})}>
-        {t("Upgrade")}
-      </button>
-    </div>
-  )
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host
-  } catch {
-    return url
-  }
-}
-
-/** IPC rejections arrive as "Error invoking remote method '…': Error: <message>". */
-function invokeError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err)
-  return message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "")
-}
-
-/**
- * Answers from your own OpenAI-compatible endpoint instead of Meetingly's server: no account, no limits.
- * The model list loads from the endpoint when it offers one; Save checks everything with one tiny request.
- */
-function OwnKeyForm({ current, onClose }: { current: OwnKeyView | null; onClose: () => void }) {
-  const [baseUrl, setBaseUrl] = useState<string>(current?.baseUrl ?? OWN_KEY_PRESETS[0].baseUrl)
-  const [key, setKey] = useState("")
-  const [model, setModel] = useState(current?.model ?? "")
-  const [models, setModels] = useState<string[]>([])
-  const [modelsNote, setModelsNote] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const keepsSavedKey = Boolean(current?.hasKey && current.baseUrl === baseUrl.trim().replace(/\/+$/, ""))
-
-  const loadModels = async (url = baseUrl, apiKey = key) => {
-    if (!/^https?:\/\/\S+/i.test(url.trim())) return
-    setModelsNote(null)
-    try {
-      const list = await api.invoke("ownkey:models", { baseUrl: url, key: apiKey })
-      setModels(list)
-      setModelsNote(list.length ? null : t("This endpoint lists no models: type the model name."))
-    } catch {
-      setModels([])
-      setModelsNote(t("Couldn't load the model list: type the model name."))
-    }
-  }
-  useEffect(() => {
-    if (current) void loadModels()
-  }, [])
-
-  const save = async () => {
-    setSaving(true)
-    setError(null)
-    try {
-      await api.invoke("ownkey:save", { baseUrl, key, model })
-      onClose()
-    } catch (err) {
-      setError(invokeError(err))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const field = "h-6 min-w-0 rounded border border-white/[0.12] bg-white/5 px-2 text-[11.5px] text-white placeholder:text-white/30 focus:border-white/35 focus:outline-none"
-  return (
-    <form
-      className="border-t border-white/10 bg-white/[0.03] px-2.5 py-2 text-[11.5px] text-white/70"
-      onSubmit={(e) => {
-        e.preventDefault()
-        void save()
-      }}
-    >
-      <div className="mb-1.5 flex items-center gap-1.5">
-        <KeyRound className="h-3 w-3 text-white/50" />
-        <span className="font-medium text-white/90">{t("Use your own API key")}</span>
-        <span className="ml-auto flex gap-1">
-          {OWN_KEY_PRESETS.map((p) => (
-            <button
-              key={p.label}
-              type="button"
-              className={cn("rounded px-1.5 py-0.5 text-[10.5px]", baseUrl === p.baseUrl ? "bg-white/15 text-white" : "text-white/50 hover:bg-white/10 hover:text-white")}
-              onClick={() => {
-                setBaseUrl(p.baseUrl)
-                setModels([])
-                void loadModels(p.baseUrl)
-              }}
-            >
-              {p.label}
-            </button>
-          ))}
-        </span>
-      </div>
-      <div className="grid grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1">
-        <label htmlFor="own-url" className="text-white/50">{t("API address")}</label>
-        <input id="own-url" className={field} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} onBlur={() => void loadModels()} spellCheck={false} />
-        <label htmlFor="own-key" className="text-white/50">{t("API key")}</label>
-        <input
-          id="own-key"
-          type="password"
-          className={field}
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          onBlur={() => void loadModels()}
-          placeholder={keepsSavedKey ? t("Saved. Leave empty to keep it.") : t("Not needed for Ollama")}
-          autoComplete="off"
-        />
-        <label htmlFor="own-model" className="text-white/50">{t("Model")}</label>
-        <input id="own-model" className={field} value={model} onChange={(e) => setModel(e.target.value)} list="own-models" placeholder={t("Pick or type a model")} spellCheck={false} />
-        <datalist id="own-models">
-          {models.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-      </div>
-      {modelsNote && <p className="mt-1 text-[11px] text-white/40">{modelsNote}</p>}
-      {error && <p className="selectable mt-1 text-[11px] text-rose-300">{error}</p>}
-      <div className="mt-1.5 flex items-center gap-1">
-        <span className="min-w-0 flex-1 text-[10.5px] leading-snug text-white/35">{t("Answers go straight to this provider. The key stays on this computer.")}</span>
-        <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" onClick={onClose}>
-          {t("Cancel")}
-        </Button>
-        <Button type="submit" variant="primary" size="sm" className="h-6 px-2.5 text-[11px]" disabled={saving || !model.trim() || !baseUrl.trim()}>
-          {saving ? t("Checking…") : t("Save")}
-        </Button>
-      </div>
-    </form>
-  )
-}
-
-/** Answer bubbles: deep navy so they stand apart from everything else; what was heard is a quiet line above. */
 const ANSWER = "rounded-lg bg-[#132238] px-3 py-2 ring-1 ring-inset ring-sky-300/10"
 
 function Message({ message }: { message: ChatMessage }) {
@@ -645,13 +503,11 @@ interface Turn {
   texts: string[]
 }
 
-/** Speaker labels stay English as data (the model and saved meetings read them); translate them on screen. */
 function speakerText(label: string): string {
   const numbered = label.match(/^Speaker (\d+)$/)
   return numbered ? t("Speaker {n}", { n: numbered[1] }) : t(label)
 }
 
-/** Consecutive lines from the same side become one turn, like a chat. */
 function toTurns(lines: TranscriptLine[]): Turn[] {
   const turns: Turn[] = []
   for (const l of lines) {
@@ -667,24 +523,33 @@ function toTurns(lines: TranscriptLine[]): Turn[] {
 function Transcript(props: {
   status: string
   connected: boolean
-  source: AudioSource
+  settings: SettingsView | null
+  devices: AudioDevices | null
+  devicesLoading: boolean
+  devicesError: string | null
+  onRefreshDevices: () => void
   notice: string | null
   lines: TranscriptLine[]
   interim: Interim
-  onSource: (s: AudioSource) => void
-  deviceId: string
-  onDevice: (id: string) => void
-  /** Suggested questions while listening; off sends nothing to the AI for them. */
-  suggestions: boolean
-  onSuggestions: (on: boolean) => void
+  update: (patch: SettingsPatch) => Promise<void>
+  onOpenProviders: () => void
 }) {
-  const { status, connected, source, notice, lines, interim, onSource, deviceId, onDevice, suggestions, onSuggestions } = props
+  const { status, connected, settings, devices, devicesLoading, devicesError, onRefreshDevices, notice, lines, interim, update, onOpenProviders } = props
   const ref = useRef<HTMLDivElement>(null)
   const [copied, setCopied] = useState(false)
+  const [startError, setStartError] = useState<string | null>(null)
   const live = [interim.them, interim.you, interim.other].filter(Boolean).join(" ")
   useEffect(() => {
     ref.current?.scrollTo({ top: ref.current.scrollHeight })
   }, [lines.length, live])
+
+  const source = settings?.audioSource ?? "both"
+  const micId = settings?.microphoneId ?? ""
+  const monitorId = settings?.monitorId ?? ""
+  const missingTranscriber = settings !== null && !settings.transcriberId
+  const missingMic = source !== "system" && !micId
+  const missingMonitor = source !== "microphone" && !monitorId
+  const canStart = !missingTranscriber && !missingMic && !missingMonitor
 
   const turns = toTurns(lines)
   const text = turns.map((turn) => (turn.label ? `${speakerText(turn.label)}: ${turn.texts.join(" ")}` : turn.texts.join(" "))).join("\n")
@@ -695,15 +560,40 @@ function Transcript(props: {
     }
   }
 
+  const startListening = async () => {
+    setStartError(null)
+    try {
+      await api.invoke("session:start")
+    } catch (err) {
+      setStartError(errorText(err))
+    }
+  }
+
+  const banner = startError ?? devicesError ?? notice
+
   return (
     <>
-      {notice && <div className="mx-2 mt-1.5 rounded-md border border-amber-400/25 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-200">{notice}</div>}
+      {banner && <div className="mx-2 mt-1.5 rounded-md border border-amber-400/25 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-200">{banner}</div>}
+      {missingTranscriber && (
+        <div className="mx-2 mt-1.5 flex items-center gap-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-100">
+          <span className="min-w-0 flex-1">Configure a Deepgram transcription provider in Settings before listening.</span>
+          <Button size="sm" variant="secondary" className="h-6 px-2 text-[11px]" onClick={onOpenProviders}>
+            Providers
+          </Button>
+        </div>
+      )}
+
       {status === "idle" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-center">
           <p className="text-[11.5px] text-white/50">{t("The live transcript shows here while listening.")}</p>
-          <Button variant="primary" size="sm" onClick={() => void api.invoke("session:start").catch(() => {})}>
+          <Button variant="primary" size="sm" disabled={!canStart} onClick={() => void startListening()}>
             <Mic className="h-3.5 w-3.5" /> {t("Start listening")}
           </Button>
+          {!canStart && !missingTranscriber && (
+            <p className="text-[11px] text-amber-200/80">
+              {missingMic && missingMonitor ? "Select a microphone and system monitor below." : missingMic ? "Select a microphone below." : "Select a system monitor below."}
+            </p>
+          )}
         </div>
       ) : (
         <div ref={ref} className="scroll selectable min-h-0 flex-1 space-y-2 px-2.5 py-2 text-[12.5px] leading-relaxed">
@@ -715,18 +605,40 @@ function Transcript(props: {
           {!text && !live && <p className="text-white/40">{connected ? t("Listening…") : t("Starting…")}</p>}
         </div>
       )}
-      <div className="flex items-center gap-1 border-t border-white/10 p-1.5">
-        <Select value={source} onChange={(e) => onSource(e.target.value as AudioSource)} className="h-7 min-w-0 flex-1 bg-black/30 px-2 py-0 text-[11px]" title={t("What to transcribe")}>
+
+      <div className="flex flex-wrap items-center gap-1 border-t border-white/10 p-1.5">
+        <Select value={source} onChange={(e) => void update({ audioSource: e.target.value as AudioSource })} className="h-7 min-w-[120px] flex-1 bg-black/30 px-2 py-0 text-[11px]" title={t("What to transcribe")}>
           {(Object.keys(AUDIO_SOURCE_LABELS) as AudioSource[]).map((s) => <option key={s} value={s}>{t(AUDIO_SOURCE_LABELS[s])}</option>)}
         </Select>
-        {source !== "system" && <MicPicker value={deviceId} onChange={onDevice} />}
-        <label
-          className="flex shrink-0 cursor-pointer items-center gap-1.5 px-1.5 text-[11px] text-white/55"
-          title={t("Suggested questions while listening. Off: just the transcript, nothing is sent to the AI for suggestions.")}
-        >
-          {t("Suggestions")}
-          <Toggle size="sm" checked={suggestions} onChange={onSuggestions} label={t("Suggested questions")} />
-        </label>
+        {source !== "system" && (
+          <Select
+            value={micId}
+            onChange={(e) => void update({ microphoneId: e.target.value })}
+            disabled={devicesLoading}
+            className="h-7 min-w-[120px] flex-1 bg-black/30 px-2 py-0 text-[11px]"
+            title="Microphone"
+          >
+            <option value="">Select microphone</option>
+            {devices?.microphones.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+            {micId && !devices?.microphones.some((d) => d.id === micId) && <option value={micId}>{micId} (missing)</option>}
+          </Select>
+        )}
+        {source !== "microphone" && (
+          <Select
+            value={monitorId}
+            onChange={(e) => void update({ monitorId: e.target.value })}
+            disabled={devicesLoading}
+            className="h-7 min-w-[120px] flex-1 bg-black/30 px-2 py-0 text-[11px]"
+            title="System monitor"
+          >
+            <option value="">Select system monitor</option>
+            {devices?.monitors.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+            {monitorId && !devices?.monitors.some((d) => d.id === monitorId) && <option value={monitorId}>{monitorId} (missing)</option>}
+          </Select>
+        )}
+        <Button variant="ghost" size="icon-sm" onClick={onRefreshDevices} disabled={devicesLoading} title="Refresh audio devices">
+          <RefreshCw className={cn("h-3.5 w-3.5", devicesLoading && "animate-spin")} />
+        </Button>
         <Button variant="ghost" size="icon-sm" onClick={copy} disabled={!text} title={t("Copy transcript")}>
           {copied ? <Check className="h-3.5 w-3.5 text-emerald-300" /> : <Copy className="h-3.5 w-3.5" />}
         </Button>
@@ -737,77 +649,138 @@ function Transcript(props: {
 
 const PICK = "h-7 w-[190px] shrink-0 bg-black/30 px-2 py-0 text-[11.5px]"
 
-/**
- * What changes from one meeting to the next, without the browser and without an account. Instructions, shortcuts,
- * the plan and past meetings stay on the web dashboard. Changes here sync to the account like changes made there.
- */
-function SettingsTab({ settings, update, plan, autoAllowed }: {
+function SettingsTab({
+  settings,
+  update,
+  onSettingsChange,
+  subTab,
+  setSubTab,
+  devices,
+  devicesLoading,
+  devicesError,
+  onRefreshDevices
+}: {
   settings: SettingsView
-  update: (patch: Partial<SettingsView>) => Promise<void>
-  plan: PlanState
-  autoAllowed: boolean
+  update: (patch: SettingsPatch) => Promise<void>
+  onSettingsChange: (next: SettingsView) => void
+  subTab: SettingsSubTab
+  setSubTab: (t: SettingsSubTab) => void
+  devices: AudioDevices | null
+  devicesLoading: boolean
+  devicesError: string | null
+  onRefreshDevices: () => void
 }) {
+  const nav: [SettingsSubTab, string][] = [
+    ["general", "General"],
+    ["providers", "Providers"],
+    ["prompts", "Prompts"],
+    ["shortcuts", "Shortcuts"],
+    ["meetings", "Meetings"]
+  ]
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="scroll min-h-0 flex-1 divide-y divide-white/[0.06] px-2.5">
-        <SettingRow label={t("Meeting language")} hint={t("The language spoken in the meeting.")}>
-          <Select value={settings.audioLanguage} onChange={(e) => void update({ audioLanguage: e.target.value as LanguageCode })} className={PICK} aria-label={t("Meeting language")}>
-            {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.name}</option>)}
-          </Select>
-        </SettingRow>
-        <SettingRow label={t("Answer language")} hint={t("For answers and the meeting report.")}>
-          <Select value={settings.outputLanguage} onChange={(e) => void update({ outputLanguage: e.target.value as LanguageCode })} className={PICK} aria-label={t("Answer language")}>
-            {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.name}</option>)}
-          </Select>
-        </SettingRow>
-        <SettingRow label={t("Audio source")} hint={t("System audio is the call; the microphone is you.")}>
-          <Select value={settings.audioSource} onChange={(e) => void update({ audioSource: e.target.value as AudioSource })} className={PICK} aria-label={t("Audio source")}>
-            {(Object.keys(AUDIO_SOURCE_LABELS) as AudioSource[]).map((s) => <option key={s} value={s}>{t(AUDIO_SOURCE_LABELS[s])}</option>)}
-          </Select>
-        </SettingRow>
-        {settings.audioSource !== "system" && (
-          <SettingRow label={t("Microphone")}>
-            <MicPicker value={settings.audioDeviceId} onChange={(id) => void update({ audioDeviceId: id })} className={PICK} />
-          </SettingRow>
-        )}
-        <SettingRow label={t("Auto-answer")} hint={t("Answers questions heard in the meeting by itself.")}>
-          {autoAllowed ? (
-            <Select value={settings.autoAnswer} onChange={(e) => void update({ autoAnswer: e.target.value as AutoAnswerMode })} className={PICK} aria-label={t("Auto-answer")}>
-              {(Object.keys(AUTO_ANSWER_LABELS) as AutoAnswerMode[]).map((m) => <option key={m} value={m}>{t(AUTO_ANSWER_LABELS[m])}</option>)}
-            </Select>
-          ) : (
-            <button
-              type="button"
-              onClick={() => void api.invoke(plan.status === "signed-out" ? "cloud:link-start" : "plan:upgrade").catch(() => {})}
-              title={t("Lite and Pro answer questions from the meeting automatically. On Free, press Answer when a question is heard.")}
-              className="flex h-7 w-[190px] shrink-0 items-center gap-1.5 rounded-md border border-white/15 px-2 text-left text-[11.5px] text-white/55 transition-colors hover:bg-white/10 hover:text-white"
-            >
-              <span className="text-sky-300">{t("Get Lite")}</span>
-            </button>
-          )}
-        </SettingRow>
-        <SettingRow label={t("Answer length")}>
-          <Select value={settings.answerLength} onChange={(e) => void update({ answerLength: e.target.value as AnswerLength })} className={PICK} aria-label={t("Answer length")}>
-            {(Object.keys(ANSWER_LENGTHS) as AnswerLength[]).map((l) => <option key={l} value={l}>{t(ANSWER_LENGTHS[l].label)}</option>)}
-          </Select>
-        </SettingRow>
-        <SettingRow label={t("Suggested questions")} hint={t("Off: just the transcript, nothing is sent to the AI for them.")}>
-          <Toggle checked={settings.suggestions} onChange={(on) => void update({ suggestions: on })} label={t("Suggested questions")} />
-        </SettingRow>
-        <SettingRow label={t("Keep meetings on this computer")} hint={t("No meeting report and no sync to your account. Answers and suggested questions still use the AI.")}>
-          <Toggle checked={settings.keepMeetingsLocal} onChange={(on) => void update({ keepMeetingsLocal: on })} label={t("Keep meetings on this computer")} />
-        </SettingRow>
-        <SettingRow label={t("Stealth mode")} hint={t("Hidden from screen sharing, recordings and screenshots.")}>
-          <Toggle checked={settings.stealth} onChange={(on) => void update({ stealth: on })} label={t("Stealth mode")} />
-        </SettingRow>
+      <div className="flex shrink-0 items-center gap-1 border-b border-white/10 px-2.5 py-1">
+        {nav.map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setSubTab(id)}
+            className={cn(
+              "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
+              subTab === id ? "bg-white/15 text-white" : "text-white/50 hover:text-white/80"
+            )}
+          >
+            {label}
+          </button>
+        ))}
       </div>
+
+      {settings.readOnlyReason && (
+        <div className="border-b border-rose-400/20 bg-rose-500/10 px-2.5 py-1 text-[11px] text-rose-200">
+          {settings.readOnlyReason}
+        </div>
+      )}
+
+      <div className="scroll min-h-0 flex-1 px-2.5">
+        {subTab === "general" && (
+          <div className="divide-y divide-white/[0.06]">
+            <SettingRow label={t("Meeting language")} hint={t("The language spoken in the meeting.")}>
+              <Select value={settings.audioLanguage} onChange={(e) => void update({ audioLanguage: e.target.value as LanguageCode })} className={PICK} aria-label={t("Meeting language")}>
+                {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.name}</option>)}
+              </Select>
+            </SettingRow>
+            <SettingRow label={t("Answer language")} hint={t("For answers and the meeting report.")}>
+              <Select value={settings.outputLanguage} onChange={(e) => void update({ outputLanguage: e.target.value as LanguageCode })} className={PICK} aria-label={t("Answer language")}>
+                {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.name}</option>)}
+              </Select>
+            </SettingRow>
+            <SettingRow label={t("Audio source")} hint={t("System audio is the call; the microphone is you.")}>
+              <Select value={settings.audioSource} onChange={(e) => void update({ audioSource: e.target.value as AudioSource })} className={PICK} aria-label={t("Audio source")}>
+                {(Object.keys(AUDIO_SOURCE_LABELS) as AudioSource[]).map((s) => <option key={s} value={s}>{t(AUDIO_SOURCE_LABELS[s])}</option>)}
+              </Select>
+            </SettingRow>
+            {settings.audioSource !== "system" && (
+              <SettingRow label={t("Microphone")} hint={devicesError ?? undefined}>
+                <div className="flex w-[190px] shrink-0 gap-1">
+                  <Select value={settings.microphoneId} onChange={(e) => void update({ microphoneId: e.target.value })} disabled={devicesLoading} className="h-7 min-w-0 flex-1 bg-black/30 px-2 py-0 text-[11.5px]">
+                    <option value="">Select microphone</option>
+                    {devices?.microphones.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+                    {settings.microphoneId && !devices?.microphones.some((d) => d.id === settings.microphoneId) && (
+                      <option value={settings.microphoneId}>{settings.microphoneId} (missing)</option>
+                    )}
+                  </Select>
+                  <Button variant="ghost" size="icon-sm" className="h-7 w-7 shrink-0" onClick={onRefreshDevices} disabled={devicesLoading}>
+                    <RefreshCw className={cn("h-3 w-3", devicesLoading && "animate-spin")} />
+                  </Button>
+                </div>
+              </SettingRow>
+            )}
+            {settings.audioSource !== "microphone" && (
+              <SettingRow label="System monitor" hint="PulseAudio / PipeWire monitor for remote participants.">
+                <Select value={settings.monitorId} onChange={(e) => void update({ monitorId: e.target.value })} disabled={devicesLoading} className={PICK}>
+                  <option value="">Select system monitor</option>
+                  {devices?.monitors.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+                  {settings.monitorId && !devices?.monitors.some((d) => d.id === settings.monitorId) && (
+                    <option value={settings.monitorId}>{settings.monitorId} (missing)</option>
+                  )}
+                </Select>
+              </SettingRow>
+            )}
+            <SettingRow label="Microphone noise suppression" hint="Applies RNNoise on the microphone channel only.">
+              <Toggle checked={settings.denoiseMic} onChange={(on) => void update({ denoiseMic: on })} label="Microphone noise suppression" />
+            </SettingRow>
+            <SettingRow label={t("Auto-answer")} hint={t("Answers questions heard in the meeting by itself.")}>
+              <Select value={settings.autoAnswer} onChange={(e) => void update({ autoAnswer: e.target.value as AutoAnswerMode })} className={PICK} aria-label={t("Auto-answer")}>
+                {(Object.keys(AUTO_ANSWER_LABELS) as AutoAnswerMode[]).map((m) => <option key={m} value={m}>{t(AUTO_ANSWER_LABELS[m])}</option>)}
+              </Select>
+            </SettingRow>
+            <SettingRow label={t("Answer length")}>
+              <Select value={settings.answerLength} onChange={(e) => void update({ answerLength: e.target.value as AnswerLength })} className={PICK} aria-label={t("Answer length")}>
+                {(Object.keys(ANSWER_LENGTHS) as AnswerLength[]).map((l) => <option key={l} value={l}>{t(ANSWER_LENGTHS[l].label)}</option>)}
+              </Select>
+            </SettingRow>
+            <SettingRow label={t("Suggested questions")} hint={t("Off: just the transcript, nothing is sent to the AI for them.")}>
+              <Toggle checked={settings.suggestions} onChange={(on) => void update({ suggestions: on })} label={t("Suggested questions")} />
+            </SettingRow>
+            <SettingRow label={t("Stealth mode")} hint={t("Hidden from screen sharing, recordings and screenshots.")}>
+              <Toggle checked={settings.stealth} onChange={(on) => void update({ stealth: on })} label={t("Stealth mode")} />
+            </SettingRow>
+          </div>
+        )}
+        {subTab === "providers" && <ProvidersSettings settings={settings} onSettingsChange={onSettingsChange} />}
+        {subTab === "prompts" && <PromptsSettings settings={settings} update={update} />}
+        {subTab === "shortcuts" && <ShortcutsSettings settings={settings} update={update} />}
+        {subTab === "meetings" && <MeetingsHistory />}
+      </div>
+
       <div className="flex items-center gap-1 border-t border-white/10 p-1.5">
-        <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" onClick={() => void api.invoke("transcripts:reveal")} title={t("Every session is saved as a text file in Documents/Meetingly.")}>
+        <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" onClick={() => void api.invoke("transcripts:reveal")} title="Saved .txt transcripts">
           <FolderOpen className="h-3 w-3" /> {t("Saved transcripts")}
         </Button>
-        <span className="min-w-0 flex-1 truncate text-center text-[10.5px] text-white/30" title={`Meetingly ${settings.version}`}>v{settings.version}</span>
-        <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" onClick={() => void api.invoke("cloud:open-web")} title={t("Instructions, shortcuts, plan and past meetings")}>
-          {t("More settings on the web")} <ExternalLink className="h-3 w-3" />
+        <span className="min-w-0 flex-1 truncate text-center text-[10.5px] text-white/30">Local BYOK</span>
+        <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" onClick={() => void api.invoke("app:open-data-dir")}>
+          App data
         </Button>
       </div>
     </div>
@@ -826,25 +799,6 @@ function SettingRow({ label, hint, children }: { label: string; hint?: string; c
   )
 }
 
-/** The microphone to listen with; the list is read again whenever it is opened, so new devices show up. */
-function MicPicker({ value, onChange, className }: { value: string; onChange: (id: string) => void; className?: string }) {
-  const [devices, setDevices] = useState<AudioInputDevice[]>([])
-  const refresh = () => void listAudioInputs().then(setDevices).catch(() => setDevices([]))
-  useEffect(refresh, [])
-  return (
-    <Select value={value} onChange={(e) => onChange(e.target.value)} onFocus={refresh} className={className ?? "h-7 min-w-0 flex-1 bg-black/30 px-2 py-0 text-[11px]"} title={t("Microphone")}>
-      <option value="">{t("Default microphone")}</option>
-      {devices.map((d) => (
-        <option key={d.id} value={d.id}>
-          {d.isMonitor ? t("{label} (system audio)", { label: d.label }) : d.label}
-        </option>
-      ))}
-      {value && !devices.some((d) => d.id === value) && <option value={value}>{t("Previously selected device (unplugged)")}</option>}
-    </Select>
-  )
-}
-
-/** The other side on the left, you on the right; unlabelled (cloud) speakers on the left with their label. */
 function TurnView({ turn, live }: { turn: Turn; live?: boolean }) {
   const mine = turn.side === "you"
   return (
@@ -863,7 +817,6 @@ function TurnView({ turn, live }: { turn: Turn; live?: boolean }) {
   )
 }
 
-/** Microphone and system-audio meters; dimmed when that source is not captured. */
 function Levels({ levels }: { levels: AudioLevels }) {
   return (
     <div className="mr-1 flex items-center gap-2">

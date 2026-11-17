@@ -1,31 +1,27 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import type { EventChannel, EventMap } from "@shared/ipc"
-import type { CloudState } from "@shared/cloud"
-import type { PlanState, SessionState, SettingsView, SuggestionsState, WindowsState } from "@shared/types"
+import type { AudioDevices, Meeting, MigrationOutcome, SessionState, SettingsPatch, SettingsView, SuggestionsState, WindowsState } from "@shared/types"
 import { api } from "./api"
 
-/** Subscribe to a main-process event for the lifetime of the component. */
 export function useEvent<K extends EventChannel>(channel: K, handler: (payload: EventMap[K]) => void): void {
   const ref = useRef(handler)
   ref.current = handler
   useEffect(() => api.on(channel, (payload) => ref.current(payload)), [channel])
 }
 
-export function useSettings(): [SettingsView | null, (patch: Partial<SettingsView>) => Promise<void>] {
+export function useSettings(): [SettingsView | null, (patch: SettingsPatch) => Promise<void>, (next: SettingsView) => void] {
   const [settings, setSettings] = useState<SettingsView | null>(null)
   useEffect(() => {
     void api.invoke("settings:get").then(setSettings)
   }, [])
   useEvent("settings:changed", setSettings)
-  const update = useCallback(async (patch: Partial<SettingsView>) => {
-    const { version, platform, shortcutConflicts, cloud, ownKey, ...rest } = patch
-    void version, platform, shortcutConflicts, cloud, ownKey
-    setSettings(await api.invoke("settings:update", rest))
+  const update = useCallback(async (patch: SettingsPatch) => {
+    setSettings(await api.invoke("settings:update", patch))
   }, [])
-  return [settings, update]
+  return [settings, update, setSettings]
 }
 
-const IDLE: SessionState = { status: "idle", startedAt: null, notice: null, connected: false, audioSource: "both", audioDeviceId: "" }
+const IDLE: SessionState = { status: "idle", startedAt: null, notice: null, connected: false, audioSource: "both", microphoneId: "", monitorId: "" }
 
 export function useSessionState(): SessionState {
   const [state, setState] = useState<SessionState>(IDLE)
@@ -54,7 +50,50 @@ export function useSuggestions(): SuggestionsState {
   return state
 }
 
-/** Ask the main process to size this window to the measured element. */
+export function useAudioDevices(): { devices: AudioDevices | null; loading: boolean; error: string | null; refresh: () => Promise<void> } {
+  const [devices, setDevices] = useState<AudioDevices | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      setDevices(await api.invoke("audio:devices"))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  return { devices, loading, error, refresh }
+}
+
+export function useMeetings(): { meetings: Meeting[]; refresh: () => Promise<void> } {
+  const [meetings, setMeetings] = useState<Meeting[]>([])
+  const refresh = useCallback(async () => {
+    setMeetings(await api.invoke("meetings:list"))
+  }, [])
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+  useEvent("meetings:changed", () => void refresh())
+  return { meetings, refresh }
+}
+
+export function useMigrationStatus(): MigrationOutcome | null {
+  const [status, setStatus] = useState<MigrationOutcome | null>(null)
+  useEffect(() => {
+    void api.invoke("migration:status").then(setStatus)
+  }, [])
+  return status
+}
+
 export function useFitWindow<T extends HTMLElement>(extra = { width: 0, height: 0 }): React.RefObject<T | null> {
   const ref = useRef<T | null>(null)
   useLayoutEffect(() => {
@@ -82,25 +121,6 @@ export function useFitWindow<T extends HTMLElement>(extra = { width: 0, height: 
   return ref
 }
 
-export function usePlanState(): PlanState {
-  const [state, setState] = useState<PlanState>({ status: "unknown" })
-  useEffect(() => {
-    void api.invoke("plan:state").then(setState)
-  }, [])
-  useEvent("plan:state", setState)
-  return state
-}
-
-export function useCloudState(): CloudState {
-  const [state, setState] = useState<CloudState>({ status: "off" })
-  useEffect(() => {
-    void api.invoke("cloud:state").then(setState)
-  }, [])
-  useEvent("cloud:state", setState)
-  return state
-}
-
-/** mm:ss elapsed since `since`, ticking once a second. */
 export function useElapsed(since: number | null): string {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
