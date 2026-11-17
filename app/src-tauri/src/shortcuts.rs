@@ -130,7 +130,9 @@ impl ShortcutManager {
                         self.windows.show_panel(app, PanelTab::Transcript, false);
                         let session = self.session.clone();
                         tauri::async_runtime::spawn(async move {
-                            let _ = session.start().await;
+                            if let Err(err) = session.start().await {
+                                session.report_error(err);
+                            }
                         });
                     }
                     SessionStatus::Recording => {

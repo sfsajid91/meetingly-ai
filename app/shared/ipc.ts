@@ -18,6 +18,7 @@ import type {
   SettingsView,
   SuggestionsState,
   TranscriptEvent,
+  TranscriptSegment,
   Utterance,
   WindowKind,
   WindowsState
@@ -63,6 +64,7 @@ export interface InvokeMap {
   "session:finish": () => Meeting | null
   "session:cancel": () => SessionState
   "session:transcript": () => string
+  "session:segments": () => TranscriptSegment[]
   "session:last-utterance": () => Utterance | null
 
   "chat:history": () => ChatMessage[]

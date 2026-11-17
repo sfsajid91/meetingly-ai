@@ -76,6 +76,28 @@ pub struct ParsedSuggestions {
     pub questions: Vec<String>,
 }
 
+enum BgTask {
+    Tokio(tokio::task::JoinHandle<()>),
+    Tauri(tauri::async_runtime::JoinHandle<()>),
+}
+
+impl BgTask {
+    fn abort(&self) {
+        match self {
+            Self::Tokio(h) => h.abort(),
+            Self::Tauri(h) => h.abort(),
+        }
+    }
+}
+
+fn spawn_bg(fut: impl std::future::Future<Output = ()> + Send + 'static) -> BgTask {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        BgTask::Tokio(handle.spawn(fut))
+    } else {
+        BgTask::Tauri(tauri::async_runtime::spawn(fut))
+    }
+}
+
 struct Inner {
     topic: String,
     context: String,
@@ -83,7 +105,7 @@ struct Inner {
     used: HashSet<String>,
     updating: bool,
     again: bool,
-    timer: Option<tokio::task::AbortHandle>,
+    timer: Option<BgTask>,
     last_run: Option<Instant>,
     seen_chars: usize,
     failed_at: Option<Instant>,
@@ -189,7 +211,7 @@ impl SuggestionService {
             let chat = self.chat.clone();
             let label = (*label).to_string();
             let prompt = (*prompt).to_string();
-            tokio::spawn(async move {
+            spawn_bg(async move {
                 let _ = chat.send(label, Some(prompt)).await;
             });
             return true;
@@ -205,7 +227,7 @@ impl SuggestionService {
         };
         (self.emit)(self.state());
         let chat = self.chat.clone();
-        tokio::spawn(async move {
+        spawn_bg(async move {
             let _ = chat.send(chosen, None).await;
         });
         true
@@ -220,12 +242,12 @@ impl SuggestionService {
     fn schedule(self: &Arc<Self>, delay: Duration) {
         self.cancel_timer();
         let this = self.clone();
-        let handle = tokio::spawn(async move {
+        let handle = spawn_bg(async move {
             tokio::time::sleep(delay).await;
             this.inner.lock().unwrap_or_else(|e| e.into_inner()).timer = None;
             this.run(false).await;
         });
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).timer = Some(handle.abort_handle());
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).timer = Some(handle);
     }
 
     async fn run(self: &Arc<Self>, force: bool) {

@@ -74,6 +74,8 @@ function mapInvoke<K extends InvokeChannel>(channel: K, args: Parameters<InvokeM
       return ["session_cancel", undefined]
     case "session:transcript":
       return ["session_transcript", undefined]
+    case "session:segments":
+      return ["session_segments", undefined]
     case "session:last-utterance":
       return ["session_last_utterance", undefined]
     case "chat:history":

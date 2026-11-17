@@ -152,6 +152,7 @@ pub type ScreenCapturer = Arc<dyn Fn() -> CaptureFuture + Send + Sync>;
 
 struct ActiveProbe {
     superseded: AtomicBool,
+    task: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 struct Inner {
@@ -225,9 +226,13 @@ impl ChatService {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(probe) = guard.probe.take() {
             probe.superseded.store(true, Ordering::SeqCst);
+            if let Some(handle) = probe.task.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                handle.abort();
+            }
         }
-        let had_active = guard.active_task.take().is_some();
-        if let Some(handle) = guard.active_task.take() {
+        let handle = guard.active_task.take();
+        let had_active = handle.is_some();
+        if let Some(handle) = handle {
             handle.abort();
         }
         let was_busy = guard.busy;
@@ -265,16 +270,25 @@ impl ChatService {
         if trimmed.is_empty() {
             return Ok(());
         }
+        let reserved_id = new_id();
         {
-            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if guard.busy {
                 return Err("Wait for the current answer to finish.".into());
             }
+            if let Some(probe) = guard.probe.take() {
+                probe.superseded.store(true, Ordering::SeqCst);
+                if let Some(handle) = probe.task.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    handle.abort();
+                }
+            }
+            guard.busy = true;
+            guard.active_id = Some(reserved_id.clone());
         }
-        self.supersede_probe();
+        (self.emit)(ChatEvent::Busy(true));
         self.push_message(None, ChatRole::User, ChatKind::Text, trimmed.clone());
         let user_content = prompt_override.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).unwrap_or(trimmed);
-        let _ = self.reply(user_content, ChatKind::Text, None, false).await;
+        let _ = self.reply(user_content, ChatKind::Text, None, false, Some(reserved_id)).await;
         self.trigger_drain();
         Ok(())
     }
@@ -283,15 +297,27 @@ impl ChatService {
         let Some(last) = self.session.last_utterance() else {
             return Ok(false);
         };
-        if self.is_busy() {
-            return Ok(false);
-        }
-        self.supersede_probe();
         let text = last.text.trim().to_string();
         if text.is_empty() {
             return Ok(false);
         }
-        self.answer_utterance(text, false).await;
+        let reserved_id = new_id();
+        {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.busy {
+                return Ok(false);
+            }
+            if let Some(probe) = guard.probe.take() {
+                probe.superseded.store(true, Ordering::SeqCst);
+                if let Some(handle) = probe.task.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    handle.abort();
+                }
+            }
+            guard.busy = true;
+            guard.active_id = Some(reserved_id.clone());
+        }
+        (self.emit)(ChatEvent::Busy(true));
+        self.answer_utterance(text, false, Some(reserved_id)).await;
         self.trigger_drain();
         Ok(true)
     }
@@ -325,6 +351,9 @@ impl ChatService {
             }
             if let Some(probe) = guard.probe.take() {
                 probe.superseded.store(true, Ordering::SeqCst);
+                if let Some(handle) = probe.task.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    handle.abort();
+                }
             }
             guard.busy = true;
         }
@@ -423,19 +452,12 @@ impl ChatService {
                     }
                 }
             };
-            self.answer_utterance(next.0, next.1).await;
+            self.answer_utterance(next.0, next.1, None).await;
             self.drain_notify.notify_waiters();
         }
     }
 
-    fn supersede_probe(&self) {
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(probe) = guard.probe.take() {
-            probe.superseded.store(true, Ordering::SeqCst);
-        }
-    }
-
-    async fn answer_utterance(self: &Arc<Self>, text: String, may_decline: bool) {
+    async fn answer_utterance(self: &Arc<Self>, text: String, may_decline: bool, reserved_id: Option<String>) {
         let answer = "answer it directly: give the answer itself, ready to say out loud, never advice about how to answer";
         let ask = if may_decline {
             format!(
@@ -444,7 +466,7 @@ impl ChatService {
         } else {
             format!("Heard in the meeting: \"{text}\"\n\nThe user wants an answer to this: {answer}.")
         };
-        if let Some(message) = self.reply(ask, ChatKind::Auto, Some(text), may_decline).await {
+        if let Some(message) = self.reply(ask, ChatKind::Auto, Some(text), may_decline, reserved_id).await {
             (self.emit)(ChatEvent::AutoAnswer(message));
         }
     }
@@ -455,10 +477,25 @@ impl ChatService {
         kind: ChatKind,
         heard: Option<String>,
         gate: bool,
+        reserved_id: Option<String>,
     ) -> Option<ChatMessage> {
+        let id = reserved_id.unwrap_or_else(new_id);
         let brain = match self.resolve_brain() {
             Ok(b) => b,
             Err(err) => {
+                let mut clear_busy = false;
+                {
+                    let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    if guard.active_id.as_deref() == Some(&id) {
+                        guard.active_task = None;
+                        guard.active_id = None;
+                        clear_busy = guard.busy;
+                        guard.busy = false;
+                    }
+                }
+                if clear_busy {
+                    (self.emit)(ChatEvent::Busy(false));
+                }
                 if !gate {
                     self.push_message(None, ChatRole::Assistant, ChatKind::Error, err);
                 } else {
@@ -480,8 +517,12 @@ impl ChatService {
             msgs
         };
 
-        let id = new_id();
-        let probe = gate.then(|| Arc::new(ActiveProbe { superseded: AtomicBool::new(false) }));
+        let probe = gate.then(|| {
+            Arc::new(ActiveProbe {
+                superseded: AtomicBool::new(false),
+                task: Mutex::new(None),
+            })
+        });
 
         #[derive(Clone, Copy, PartialEq, Eq)]
         enum StreamGateState {
@@ -492,7 +533,7 @@ impl ChatService {
 
         let shared_state = Arc::new(Mutex::new((
             if probe.is_some() { StreamGateState::Wait } else { StreamGateState::Answer },
-            false, // committed
+            probe.is_none(), // committed
             String::new(), // buffered head
         )));
 
@@ -500,11 +541,13 @@ impl ChatService {
             self.inner.lock().unwrap_or_else(|e| e.into_inner()).probe = Some(p.clone());
         } else {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let need_emit = !guard.busy;
             guard.busy = true;
             guard.active_id = Some(id.clone());
-            shared_state.lock().unwrap().1 = true;
             drop(guard);
-            (self.emit)(ChatEvent::Busy(true));
+            if need_emit {
+                (self.emit)(ChatEvent::Busy(true));
+            }
         }
 
         let commit_visible = {
@@ -577,8 +620,11 @@ impl ChatService {
         );
 
         let handle = tokio::spawn(call);
-        if probe.is_none() {
-            self.inner.lock().unwrap_or_else(|e| e.into_inner()).active_task = Some(handle.abort_handle());
+        let abort = handle.abort_handle();
+        if let Some(ref p) = probe {
+            *p.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(abort);
+        } else {
+            self.inner.lock().unwrap_or_else(|e| e.into_inner()).active_task = Some(abort);
         }
 
         let outcome = handle.await;
@@ -905,5 +951,45 @@ mod tests {
         assert_eq!(hist[0].kind, ChatKind::Auto);
         assert_eq!(hist[1].role, ChatRole::Assistant);
         assert!(events.lock().unwrap().iter().any(|e| matches!(e, ChatEvent::AutoAnswer(_))));
+    }
+
+    struct HangingBackend {
+        started: Arc<Notify>,
+    }
+
+    impl BrainBackend for HangingBackend {
+        fn chat_stream(&self, _: BrainConfig, _: Vec<LlmMessage>, _: Box<dyn FnMut(&str) + Send>) -> StreamFuture {
+            let started = self.started.clone();
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending::<Result<LlmResult, String>>().await
+            })
+        }
+
+        fn chat_once(&self, _: BrainConfig, _: Vec<LlmMessage>) -> StreamFuture {
+            Box::pin(async { Err("unused".into()) })
+        }
+
+        fn vision(&self, _: BrainConfig, _: String, _: String, _: Option<String>) -> StreamFuture {
+            Box::pin(async { Err("unused".into()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_in_flight_stream_and_clears_busy() {
+        let started = Arc::new(Notify::new());
+        let backend = Arc::new(HangingBackend { started: started.clone() });
+        let (_dir, _settings, chat, events) = setup_chat(backend);
+
+        let chat_send = chat.clone();
+        let task = tokio::spawn(async move { chat_send.send("Explain QUIC".into(), None).await });
+        started.notified().await;
+        assert!(chat.is_busy());
+        assert!(chat.cancel());
+        assert!(!chat.is_busy());
+
+        task.await.unwrap().unwrap();
+        assert!(!chat.is_busy());
+        assert!(events.lock().unwrap().iter().any(|e| matches!(e, ChatEvent::Busy(false))));
     }
 }

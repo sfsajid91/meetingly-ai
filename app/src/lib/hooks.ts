@@ -134,3 +134,37 @@ export function useElapsed(since: number | null): string {
   const s = total % 60
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
 }
+
+/** Pointer-driven native window drag handler for frameless toolbars across Wayland/X11/macOS/Windows. */
+export function useDragToolbar() {
+  const drag = useRef<{ x: number; y: number; dx: number; dy: number; frame: number } | null>(null)
+  const end = (e: React.PointerEvent<HTMLElement>) => {
+    const d = drag.current
+    if (!d) return
+    cancelAnimationFrame(d.frame)
+    drag.current = null
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
+    void api.invoke("windows:drag", { phase: "move", dx: d.dx, dy: d.dy }).then(() => api.invoke("windows:drag", { phase: "end", dx: 0, dy: 0 }))
+  }
+  return {
+    onPointerDown: (e: React.PointerEvent<HTMLElement>) => {
+      if (e.button !== 0 || (e.target as HTMLElement).closest("button, select, input, a, label")) return
+      e.currentTarget.setPointerCapture(e.pointerId)
+      drag.current = { x: e.screenX, y: e.screenY, dx: 0, dy: 0, frame: 0 }
+      void api.invoke("windows:drag", { phase: "start", dx: 0, dy: 0 })
+    },
+    onPointerMove: (e: React.PointerEvent<HTMLElement>) => {
+      const d = drag.current
+      if (!d) return
+      d.dx = e.screenX - d.x
+      d.dy = e.screenY - d.y
+      if (d.frame) return
+      d.frame = requestAnimationFrame(() => {
+        d.frame = 0
+        if (drag.current === d) void api.invoke("windows:drag", { phase: "move", dx: d.dx, dy: d.dy })
+      })
+    },
+    onPointerUp: end,
+    onPointerCancel: end
+  }
+}

@@ -18,6 +18,14 @@ const MAX_RECONNECTS: u32 = 5;
 const UTTERANCE_MAX_MS: f64 = 20_000.0;
 const DUPLICATE_FINAL_WINDOW_MS: f64 = 1_500.0;
 
+fn spawn_bg(fut: impl Future<Output = ()> + Send + 'static) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(fut);
+    } else {
+        tauri::async_runtime::spawn(fut);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
@@ -257,6 +265,19 @@ impl SessionManager {
         format_transcript(&guard.segments)
     }
 
+    pub fn segments(&self) -> Vec<TranscriptSegment> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).segments.clone()
+    }
+
+    pub fn report_error(&self, err: String) {
+        let state = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.notice = Some(err);
+            self.build_state(&guard)
+        };
+        (self.emit)(SessionEvent::State(state));
+    }
+
     pub fn last_utterance(&self) -> Option<Utterance> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).last_utterance.clone()
     }
@@ -404,7 +425,7 @@ impl SessionManager {
         (self.emit)(SessionEvent::State(state.clone()));
         if need_reconnect {
             let this = self.clone();
-            tokio::spawn(async move {
+            spawn_bg(async move {
                 let session_gen = this.inner.lock().unwrap_or_else(|e| e.into_inner()).generation;
                 if let Ok((cfg, key)) = this.resolve_deepgram_config() {
                     match this.open_socket_for(cfg, key, session_gen).await {
@@ -432,6 +453,8 @@ impl SessionManager {
                     }
                 }
             });
+        } else {
+            self.sync_engine();
         }
         state
     }
@@ -453,6 +476,9 @@ impl SessionManager {
             guard.opening = false;
             let flushed = Self::drain_pending_utterances(&mut guard, now_ms());
             let meeting = self.to_meeting(&guard, now_ms());
+            guard.segments.clear();
+            guard.last_final.clear();
+            guard.last_utterance = None;
             guard.status = SessionStatus::Idle;
             guard.started_at = None;
             guard.notice = None;
@@ -513,7 +539,7 @@ impl SessionManager {
     }
 
     pub fn sync_engine(self: &Arc<Self>) {
-        let (need_socket, need_capture, session_gen, audio_key) = {
+        let (flushed, need_socket, need_capture, session_gen, audio_key) = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if !matches!(guard.status, SessionStatus::Recording | SessionStatus::Paused) {
                 return;
@@ -534,11 +560,19 @@ impl SessionManager {
                 && !guard.reconnecting
                 && desired_engine.is_some()
                 && guard.engine_key != desired_engine;
-            if need_socket {
+            let flushed = if need_socket {
+                let drained = Self::drain_pending_utterances(&mut guard, now_ms());
                 guard.pending.clear();
-            }
-            (need_socket, need_capture, guard.generation, desired_audio)
+                drained
+            } else {
+                Vec::new()
+            };
+            (flushed, need_socket, need_capture, guard.generation, desired_audio)
         };
+
+        for u in flushed {
+            (self.emit)(SessionEvent::Utterance(u));
+        }
 
         if need_capture && validate_audio_selection(&audio_key).is_ok() {
             if let Ok(cap) = self.start_capture(&audio_key, session_gen) {
@@ -552,7 +586,7 @@ impl SessionManager {
 
         if need_socket {
             let this = self.clone();
-            tokio::spawn(async move {
+            spawn_bg(async move {
                 match this.resolve_deepgram_config() {
                     Ok((cfg, key)) => {
                         if let Err(err) = this.open_socket_for(cfg, key, session_gen).await {
@@ -644,6 +678,8 @@ impl SessionManager {
             if guard.generation != session_gen || guard.status == SessionStatus::Idle {
                 return;
             }
+            guard.capture.take();
+            guard.audio_key = None;
             guard.status = SessionStatus::Paused;
             guard.paused_flag.store(true, Ordering::SeqCst);
             guard.notice = Some(err);
@@ -695,7 +731,7 @@ impl SessionManager {
         (self.emit)(SessionEvent::State(state));
 
         let this = self.clone();
-        tokio::spawn(async move {
+        spawn_bg(async move {
             while let Some(ev) = rx.recv().await {
                 let still_active = {
                     let guard = this.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -716,9 +752,12 @@ impl SessionManager {
                             (this.emit)(SessionEvent::State(st));
                         }
                     }
-                    SocketEvent::Closed { by_us, .. } => {
+                    SocketEvent::Closed { by_us, reason } => {
                         if by_us {
                             break;
+                        }
+                        if !reason.is_empty() {
+                            eprintln!("[deepgram] closed: {reason}");
                         }
                         {
                             let mut guard = this.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -769,7 +808,7 @@ impl SessionManager {
         };
 
         let this = self.clone();
-        tokio::spawn(async move {
+        spawn_bg(async move {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             let should_try = {
                 let mut guard = this.inner.lock().unwrap_or_else(|e| e.into_inner());

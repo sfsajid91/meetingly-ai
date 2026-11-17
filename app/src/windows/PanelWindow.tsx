@@ -43,7 +43,7 @@ import {
 import { t } from "@shared/i18n"
 import { api, errorText, shortcutLabel } from "@/lib/api"
 import { useAudioLevels, useLiveTranscript, type Interim, type TranscriptLine } from "@/lib/capture"
-import { useAudioDevices, useEvent, useSessionState, useSettings, useSuggestions } from "@/lib/hooks"
+import { useAudioDevices, useDragToolbar, useEvent, useSessionState, useSettings, useSuggestions } from "@/lib/hooks"
 import { cn, copyText } from "@/lib/utils"
 import { markdownToPlain } from "@/lib/plain-text"
 import { Button } from "@/components/ui/button"
@@ -198,39 +198,6 @@ export function PanelWindow() {
       </div>
     </div>
   )
-}
-
-function useDragToolbar() {
-  const drag = useRef<{ x: number; y: number; dx: number; dy: number; frame: number } | null>(null)
-  const end = (e: React.PointerEvent<HTMLElement>) => {
-    const d = drag.current
-    if (!d) return
-    cancelAnimationFrame(d.frame)
-    drag.current = null
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
-    void api.invoke("windows:drag", { phase: "move", dx: d.dx, dy: d.dy }).then(() => api.invoke("windows:drag", { phase: "end", dx: 0, dy: 0 }))
-  }
-  return {
-    onPointerDown: (e: React.PointerEvent<HTMLElement>) => {
-      if (e.button !== 0 || (e.target as HTMLElement).closest("button, select, input, a, label")) return
-      e.currentTarget.setPointerCapture(e.pointerId)
-      drag.current = { x: e.screenX, y: e.screenY, dx: 0, dy: 0, frame: 0 }
-      void api.invoke("windows:drag", { phase: "start", dx: 0, dy: 0 })
-    },
-    onPointerMove: (e: React.PointerEvent<HTMLElement>) => {
-      const d = drag.current
-      if (!d) return
-      d.dx = e.screenX - d.x
-      d.dy = e.screenY - d.y
-      if (d.frame) return
-      d.frame = requestAnimationFrame(() => {
-        d.frame = 0
-        if (drag.current === d) void api.invoke("windows:drag", { phase: "move", dx: d.dx, dy: d.dy })
-      })
-    },
-    onPointerUp: end,
-    onPointerCancel: end
-  }
 }
 
 function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {

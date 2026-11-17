@@ -27,7 +27,9 @@ export function useLiveTranscript(session: SessionState): { lines: TranscriptLin
   const [interim, setInterim] = useState<Interim>({})
 
   useEffect(() => {
-    void api.invoke("session:transcript").then((text) => setLines(text ? [{ text, speaker: null, channel: null }] : []))
+    void api
+      .invoke("session:segments")
+      .then((segments) => setLines(segments.map((s) => ({ text: s.text, speaker: s.speaker, channel: s.channel ?? null }))))
   }, [])
   useEvent("session:transcript", (e) => {
     const side = e.channel ?? "other"

@@ -19,7 +19,7 @@ mod windows;
 use audio::AudioDevices;
 use chat::{ChatEvent, ChatMessage, ChatService, ScreenshotResult};
 use llm::{LlmClient, ProviderTestResult};
-use meetings::{Meeting, MeetingStore};
+use meetings::{Meeting, MeetingStore, TranscriptSegment};
 use reports::ReportGenerator;
 use serde::Deserialize;
 use session::{SessionEvent, SessionManager, SessionState, SessionStatus, Utterance};
@@ -284,6 +284,11 @@ fn session_transcript(session: State<'_, Arc<SessionManager>>) -> String {
 }
 
 #[tauri::command]
+fn session_segments(session: State<'_, Arc<SessionManager>>) -> Vec<TranscriptSegment> {
+    session.segments()
+}
+
+#[tauri::command]
 fn session_last_utterance(session: State<'_, Arc<SessionManager>>) -> Option<Utterance> {
     session.last_utterance()
 }
@@ -493,7 +498,8 @@ pub fn run() {
                     SessionEvent::Levels(levels) => {
                         let _ = app_handle.emit("audio-levels", &levels);
                     }
-                    SessionEvent::Finished(_) => {
+                    SessionEvent::Finished(meeting) => {
+                        let _ = &meeting.id;
                         let _ = app_handle.emit("meetings:changed", ());
                     }
                     SessionEvent::Discarded => {}
@@ -529,7 +535,8 @@ pub fn run() {
                         ChatEvent::Cleared => {
                             let _ = app_handle.emit("chat:cleared", ());
                         }
-                        ChatEvent::AutoAnswer(_) => {
+                        ChatEvent::AutoAnswer(msg) => {
+                            let _ = &msg.id;
                             windows.show_panel(&app_handle, PanelTab::Answers, true);
                         }
                     }
@@ -608,6 +615,7 @@ pub fn run() {
             session_finish,
             session_cancel,
             session_transcript,
+            session_segments,
             session_last_utterance,
             chat_history,
             chat_send,

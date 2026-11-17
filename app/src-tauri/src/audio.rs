@@ -56,13 +56,10 @@ pub struct AudioDevices {
     monitors: Vec<AudioDevice>,
 }
 
-enum CaptureSource {
-    Microphone,
-    System,
-}
-
 enum CaptureMessage {
-    Samples(CaptureSource, Vec<f32>),
+    MicBlock([f32; BLOCK_SAMPLES], usize),
+    SystemBlock([f32; BLOCK_SAMPLES], usize),
+    Fault(String),
 }
 
 pub struct LiveCapture {
@@ -105,8 +102,7 @@ impl LiveCapture {
         };
 
         let (mic_rate, mic_stream) = if want_mic {
-            let reporter = report_error.clone();
-            let (rate, stream) = open_microphone_stream_cb(microphone, capture_tx.clone(), reporter)?;
+            let (rate, stream) = open_microphone_stream_cb(microphone, capture_tx.clone())?;
             (rate, Some(stream))
         } else {
             (TARGET_RATE, None)
@@ -216,7 +212,7 @@ fn live_capture_loop(
     let mut sys_rms_acc = RmsAccumulator::default();
     let mut last_levels = Instant::now();
 
-    loop {
+    'outer: loop {
         if let Some(ref mut proc) = child {
             match proc.0.try_wait() {
                 Ok(Some(status)) => {
@@ -239,11 +235,11 @@ fn live_capture_loop(
         let is_paused = paused.load(Ordering::Relaxed);
         loop {
             match receiver.try_recv() {
-                Ok(CaptureMessage::Samples(CaptureSource::Microphone, samples)) => {
+                Ok(CaptureMessage::MicBlock(buf, len)) => {
                     if is_paused {
                         continue;
                     }
-                    let at_48k = mic_resampler.push(&samples);
+                    let at_48k = mic_resampler.push(&buf[..len]);
                     let clean = match mic_denoiser.as_mut() {
                         Some(denoiser) => denoiser.process(&at_48k),
                         None => at_48k,
@@ -252,13 +248,17 @@ fn live_capture_loop(
                     mic_rms_acc.push(&at_16k);
                     mic_16k.extend(at_16k);
                 }
-                Ok(CaptureMessage::Samples(CaptureSource::System, samples)) => {
+                Ok(CaptureMessage::SystemBlock(buf, len)) => {
                     if is_paused {
                         continue;
                     }
-                    let at_16k = sys_decimator.push(&samples);
+                    let at_16k = sys_decimator.push(&buf[..len]);
                     sys_rms_acc.push(&at_16k);
                     sys_16k.extend(at_16k);
+                }
+                Ok(CaptureMessage::Fault(err)) => {
+                    report_error(err);
+                    break 'outer;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => break,
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -494,7 +494,6 @@ impl MicDenoiser {
 fn open_microphone_stream_cb(
     requested: &str,
     sender: SyncSender<CaptureMessage>,
-    report_error: impl Fn(String) + Send + Sync + Clone + 'static,
 ) -> Result<(u32, cpal::Stream), String> {
     let host = cpal::default_host();
     let devices = host.input_devices().map_err(|e| format!("Could not enumerate microphones: {e}"))?;
@@ -517,12 +516,14 @@ fn open_microphone_stream_cb(
         return Err("Microphone reports zero channels".into());
     }
     let config: cpal::StreamConfig = supported.clone().into();
-    let err_cb = report_error.clone();
-    let stream_error = move |error| err_cb(format!("Microphone capture failed: {error}"));
+    let err_tx = sender.clone();
+    let stream_error = move |error| {
+        let _ = err_tx.try_send(CaptureMessage::Fault(format!("Microphone capture failed: {error}")));
+    };
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => build_mic_stream_cb::<f32, _>(&device, &config, channels, sender, report_error, stream_error)?,
-        cpal::SampleFormat::I16 => build_mic_stream_cb::<i16, _>(&device, &config, channels, sender, report_error, stream_error)?,
-        cpal::SampleFormat::U16 => build_mic_stream_cb::<u16, _>(&device, &config, channels, sender, report_error, stream_error)?,
+        cpal::SampleFormat::F32 => build_mic_stream_cb::<f32, _>(&device, &config, channels, sender, stream_error)?,
+        cpal::SampleFormat::I16 => build_mic_stream_cb::<i16, _>(&device, &config, channels, sender, stream_error)?,
+        cpal::SampleFormat::U16 => build_mic_stream_cb::<u16, _>(&device, &config, channels, sender, stream_error)?,
         format => return Err(format!("Microphone sample format is unsupported: {format:?}")),
     };
     Ok((rate, stream))
@@ -533,7 +534,6 @@ fn build_mic_stream_cb<T, E>(
     config: &cpal::StreamConfig,
     channels: usize,
     sender: SyncSender<CaptureMessage>,
-    report_error: impl Fn(String) + Send + Sync + 'static,
     on_error: E,
 ) -> Result<cpal::Stream, String>
 where
@@ -541,24 +541,26 @@ where
     f32: FromSample<T>,
     E: FnMut(cpal::StreamError) + Send + 'static,
 {
+    let mut block = [0.0f32; BLOCK_SAMPLES];
+    let mut len = 0usize;
     device
         .build_input_stream(
             config,
             move |data: &[T], _| {
-                let mut block = Vec::with_capacity(BLOCK_SAMPLES);
                 for frame in data.chunks_exact(channels) {
                     let mono = frame.iter().map(|sample| f32::from_sample(*sample)).sum::<f32>() / channels as f32;
-                    block.push(mono);
-                    if block.len() == BLOCK_SAMPLES {
-                        if send_samples(&sender, CaptureSource::Microphone, std::mem::take(&mut block)).is_err() {
-                            report_error("Audio capture queue overflowed".into());
+                    block[len] = mono;
+                    len += 1;
+                    if len == BLOCK_SAMPLES {
+                        if sender.try_send(CaptureMessage::MicBlock(block, BLOCK_SAMPLES)).is_err() {
                             return;
                         }
-                        block = Vec::with_capacity(BLOCK_SAMPLES);
+                        len = 0;
                     }
                 }
-                if !block.is_empty() && send_samples(&sender, CaptureSource::Microphone, block).is_err() {
-                    report_error("Audio capture queue overflowed".into());
+                if len > 0 {
+                    let _ = sender.try_send(CaptureMessage::MicBlock(block, len));
+                    len = 0;
                 }
             },
             on_error,
@@ -577,7 +579,8 @@ fn spawn_monitor_reader_cb(
         .spawn(move || {
             let mut bytes = [0u8; 8192];
             let mut pending = Vec::with_capacity(7);
-            let mut block = Vec::with_capacity(BLOCK_SAMPLES);
+            let mut block = [0.0f32; BLOCK_SAMPLES];
+            let mut len = 0usize;
             loop {
                 match stdout.read(&mut bytes) {
                     Ok(0) => break,
@@ -587,13 +590,14 @@ fn spawn_monitor_reader_cb(
                         for frame in pending[..usable].chunks_exact(8) {
                             let left = f32::from_le_bytes(frame[0..4].try_into().unwrap());
                             let right = f32::from_le_bytes(frame[4..8].try_into().unwrap());
-                            block.push((left + right) * 0.5);
-                            if block.len() == BLOCK_SAMPLES {
-                                if send_samples(&sender, CaptureSource::System, std::mem::take(&mut block)).is_err() {
+                            block[len] = (left + right) * 0.5;
+                            len += 1;
+                            if len == BLOCK_SAMPLES {
+                                if sender.try_send(CaptureMessage::SystemBlock(block, BLOCK_SAMPLES)).is_err() {
                                     report_error("Audio capture queue overflowed".into());
                                     return;
                                 }
-                                block = Vec::with_capacity(BLOCK_SAMPLES);
+                                len = 0;
                             }
                         }
                         pending.drain(..usable);
@@ -604,7 +608,7 @@ fn spawn_monitor_reader_cb(
                     }
                 }
             }
-            if !block.is_empty() && send_samples(&sender, CaptureSource::System, block).is_err() {
+            if len > 0 && sender.try_send(CaptureMessage::SystemBlock(block, len)).is_err() {
                 report_error("Audio capture queue overflowed".into());
             }
         })
@@ -627,10 +631,6 @@ pub fn devices() -> Result<AudioDevices, String> {
         .map(|source| AudioDevice { id: source.to_string(), label: source.to_string() })
         .collect();
     Ok(AudioDevices { microphones, monitors })
-}
-
-fn send_samples(sender: &SyncSender<CaptureMessage>, source: CaptureSource, samples: Vec<f32>) -> Result<(), ()> {
-    sender.try_send(CaptureMessage::Samples(source, samples)).map_err(|_| ())
 }
 
 struct ChildCapture(Child);

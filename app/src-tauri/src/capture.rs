@@ -17,6 +17,7 @@ pub struct CapturedScreen {
     pub base64: String,
     pub width: u32,
     pub height: u32,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub bytes: usize,
 }
 

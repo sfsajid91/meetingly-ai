@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url"
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const dir = path.join(root, "shared", "i18n", "locales")
-const SOURCES = ["src", "electron", "shared"]
+const SOURCES = ["src", "shared"]
 
 function files(d) {
   return fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => {

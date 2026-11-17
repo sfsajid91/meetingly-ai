@@ -3,7 +3,7 @@ import { Camera, Captions, Check, EyeOff, MessageSquare, Mic, Pause, Play, Power
 import { DEFAULT_SHORTCUTS } from "@shared/types"
 import { t } from "@shared/i18n"
 import { api, errorText, shortcutLabel } from "@/lib/api"
-import { useElapsed, useFitWindow, useSessionState, useSettings, useWindowsState } from "@/lib/hooks"
+import { useDragToolbar, useElapsed, useFitWindow, useSessionState, useSettings, useWindowsState } from "@/lib/hooks"
 import type { PanelTab } from "@shared/types"
 import { Button } from "@/components/ui/button"
 import { Dot } from "@/components/ui/badge"
@@ -17,6 +17,7 @@ export function MainWindow() {
   const [settings] = useSettings()
   const KEYS = settings?.shortcuts ?? DEFAULT_SHORTCUTS
   const elapsed = useElapsed(session.startedAt)
+  const dragToolbar = useDragToolbar()
   const [error, setError] = useState<string | null>(null)
 
   const run = async (action: () => Promise<unknown>) => {
@@ -57,7 +58,7 @@ export function MainWindow() {
 
   return (
     <div ref={ref} className="inline-block p-1">
-      <div className="glass drag flex h-10 items-center gap-0.5 px-1">
+      <div {...dragToolbar} className="glass drag flex h-10 cursor-grab items-center gap-0.5 px-1">
         <Grip />
         <Button variant="ghost" size="icon" onClick={() => void api.invoke("windows:toggle-all")} title={t("Hide all windows ({shortcut})", { shortcut: shortcutLabel(KEYS.toggleAll) })}>
           <EyeOff className="h-4 w-4" />

@@ -176,7 +176,7 @@ impl LlmClient {
         max_tokens: Option<u32>,
     ) -> Result<LlmResult, String> {
         let base = normalize_base_url(endpoint);
-        let body = build_chat_body(model, messages, false, max_tokens);
+        let body = build_chat_body(model, messages, false, max_tokens, false);
         let res = self.post_chat(&base, api_key, &body, REQUEST_TIMEOUT).await.map_err(|e| describe_error(None, &e, &base, model))?;
         let status = res.status().as_u16();
         let raw = res.text().await.unwrap_or_default();
@@ -205,13 +205,7 @@ impl LlmClient {
         F: FnMut(&str) + Send,
     {
         let base = normalize_base_url(endpoint);
-        let body = build_chat_body(model, messages, true, None);
-        let res = self.post_chat(&base, api_key, &body, REQUEST_TIMEOUT).await.map_err(|e| describe_error(None, &e, &base, model))?;
-        let status = res.status().as_u16();
-        if status >= 400 {
-            let raw = res.text().await.unwrap_or_default();
-            return Err(describe_error(Some(status), &raw, &base, model));
-        }
+        let res = self.post_stream_chat(&base, api_key, model, messages, None, REQUEST_TIMEOUT).await?;
 
         let mut stream = res.bytes_stream();
         let mut buffer = Vec::<u8>::new();
@@ -255,71 +249,77 @@ impl LlmClient {
 
     pub async fn test_provider(&self, endpoint: &str, api_key: Option<&str>, model: &str) -> ProviderTestResult {
         let base = normalize_base_url(endpoint);
-        let text_body = build_chat_body(model, &[LlmMessage::user("Reply with OK.")], true, Some(16));
-        let stream_ok = match self.post_chat(&base, api_key, &text_body, TEST_TIMEOUT).await {
-            Ok(res) => {
-                let status = res.status().as_u16();
-                if status >= 400 {
-                    let raw = res.text().await.unwrap_or_default();
-                    return ProviderTestResult {
-                        ok: false,
-                        role: ProviderRole::Brain,
-                        streaming: Some(false),
-                        vision: None,
-                        detail: describe_error(Some(status), &raw, &base, model),
-                    };
-                }
-                let mut stream = res.bytes_stream();
-                let mut buf = Vec::new();
-                let mut full = String::new();
-                let mut tokens = 0u64;
-                let mut err_msg = None;
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(bytes) => {
-                            buf.extend_from_slice(&bytes);
-                            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                                let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                                let line = String::from_utf8_lossy(&line_bytes);
-                                match process_sse_line(&line, &mut full, &mut tokens, &mut |_| {}) {
-                                    Ok(true) => break,
-                                    Ok(false) => {}
-                                    Err(e) => {
-                                        err_msg = Some(e);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            err_msg = Some(describe_error(None, &e.to_string(), &base, model));
-                            break;
-                        }
-                    }
-                }
-                if let Some(detail) = err_msg {
-                    return ProviderTestResult {
-                        ok: false,
-                        role: ProviderRole::Brain,
-                        streaming: Some(false),
-                        vision: None,
-                        detail,
-                    };
-                }
-                true
-            }
-            Err(e) => {
+        let res = match self
+            .post_stream_chat(&base, api_key, model, &[LlmMessage::user("Reply with OK.")], Some(16), TEST_TIMEOUT)
+            .await
+        {
+            Ok(res) => res,
+            Err(detail) => {
                 return ProviderTestResult {
                     ok: false,
                     role: ProviderRole::Brain,
                     streaming: Some(false),
                     vision: None,
-                    detail: describe_error(None, &e, &base, model),
+                    detail,
                 };
             }
         };
 
-        let vision_body = build_chat_body(model, &[LlmMessage::user_image("Reply OK.", TINY_JPEG_BASE64)], false, Some(16));
+        let mut stream = res.bytes_stream();
+        let mut buf = Vec::new();
+        let mut full = String::new();
+        let mut tokens = 0u64;
+        let mut err_msg = None;
+        let mut saw_sse_data = false;
+        'sse: while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    buf.extend_from_slice(&bytes);
+                    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                        let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+                        let line = String::from_utf8_lossy(&line_bytes);
+                        if line.trim_start().starts_with("data:") {
+                            saw_sse_data = true;
+                        }
+                        match process_sse_line(&line, &mut full, &mut tokens, &mut |_| {}) {
+                            Ok(true) => break 'sse,
+                            Ok(false) => {}
+                            Err(e) => {
+                                err_msg = Some(e);
+                                break 'sse;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    err_msg = Some(describe_error(None, &e.to_string(), &base, model));
+                    break;
+                }
+            }
+        }
+        if err_msg.is_none() && !buf.is_empty() {
+            let line = String::from_utf8_lossy(&buf);
+            if line.trim_start().starts_with("data:") {
+                saw_sse_data = true;
+            }
+            if let Err(e) = process_sse_line(&line, &mut full, &mut tokens, &mut |_| {}) {
+                err_msg = Some(e);
+            }
+        }
+        if err_msg.is_none() && !saw_sse_data {
+            err_msg = Some(format!("Provider at {} returned no SSE data chunks.", host_of(&base)));
+        }
+        if let Some(detail) = err_msg {
+            return ProviderTestResult {
+                ok: false,
+                role: ProviderRole::Brain,
+                streaming: Some(false),
+                vision: None,
+                detail,
+            };
+        }
+
+        let vision_body = build_chat_body(model, &[LlmMessage::user_image("Reply OK.", TINY_JPEG_BASE64)], false, Some(16), false);
         let vision_ok = match self.post_chat(&base, api_key, &vision_body, TEST_TIMEOUT).await {
             Ok(res) => res.status().is_success(),
             Err(_) => false,
@@ -331,11 +331,40 @@ impl LlmClient {
             "Streaming works. Image analysis is not supported by this model or endpoint.".into()
         };
         ProviderTestResult {
-            ok: stream_ok,
+            ok: true,
             role: ProviderRole::Brain,
-            streaming: Some(stream_ok),
+            streaming: Some(true),
             vision: Some(vision_ok),
             detail,
+        }
+    }
+
+    async fn post_stream_chat(
+        &self,
+        base: &str,
+        api_key: Option<&str>,
+        model: &str,
+        messages: &[LlmMessage],
+        max_tokens: Option<u32>,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, String> {
+        let mut include_stream_options = true;
+        loop {
+            let body = build_chat_body(model, messages, true, max_tokens, include_stream_options);
+            let res = self
+                .post_chat(base, api_key, &body, timeout)
+                .await
+                .map_err(|e| describe_error(None, &e, base, model))?;
+            let status = res.status().as_u16();
+            if status < 400 {
+                return Ok(res);
+            }
+            let raw = res.text().await.unwrap_or_default();
+            if include_stream_options && status == 400 && raw.to_lowercase().contains("stream_options") {
+                include_stream_options = false;
+                continue;
+            }
+            return Err(describe_error(Some(status), &raw, base, model));
         }
     }
 
@@ -351,7 +380,7 @@ impl LlmClient {
     }
 }
 
-fn build_chat_body(model: &str, messages: &[LlmMessage], stream: bool, max_tokens: Option<u32>) -> Value {
+fn build_chat_body(model: &str, messages: &[LlmMessage], stream: bool, max_tokens: Option<u32>, include_stream_options: bool) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("model".into(), Value::String(model.to_string()));
     obj.insert("messages".into(), Value::Array(messages.iter().map(LlmMessage::to_json).collect()));
@@ -360,7 +389,9 @@ fn build_chat_body(model: &str, messages: &[LlmMessage], stream: bool, max_token
     }
     if stream {
         obj.insert("stream".into(), Value::Bool(true));
-        obj.insert("stream_options".into(), json!({ "include_usage": true }));
+        if include_stream_options {
+            obj.insert("stream_options".into(), json!({ "include_usage": true }));
+        }
     }
     if let Some(limit) = max_tokens {
         obj.insert("max_tokens".into(), json!(limit));
@@ -560,5 +591,60 @@ mod tests {
         assert_eq!(res.streaming, Some(true));
         assert_eq!(res.vision, Some(false));
         assert!(res.detail.contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn retries_without_stream_options_on_400_and_reports_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_srv = calls.clone();
+        let base = spawn_mock_http(move |_headers, body| {
+            let parsed: Value = serde_json::from_str(&body).unwrap();
+            let model = parsed["model"].as_str().unwrap_or("");
+            match model {
+                "no-stream-opts" => {
+                    calls_srv.fetch_add(1, Ordering::SeqCst);
+                    if parsed.get("stream_options").is_some() {
+                        return (400, "application/json", vec![br#"{"error":{"message":"unknown parameter stream_options"}}"#.to_vec()]);
+                    }
+                    (200, "text/event-stream", vec![b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n".to_vec()])
+                }
+                "empty-sse" => (200, "text/event-stream", vec![b": keepalive\n\n".to_vec()]),
+                "bad-chunk" => (200, "text/event-stream", vec![b"data: {not-json}\n\n".to_vec()]),
+                "unauth" => (401, "application/json", vec![br#"{"error":{"message":"invalid key"}}"#.to_vec()]),
+                _ => (500, "application/json", vec![br#"{"error":{"message":"boom"}}"#.to_vec()]),
+            }
+        })
+        .await;
+
+        let client = LlmClient::new();
+        let res = client
+            .chat_stream(&base, None, "no-stream-opts", &[LlmMessage::user("hi")], |_| {})
+            .await
+            .unwrap();
+        assert_eq!(res.text, "ok");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let empty = client.test_provider(&base, None, "empty-sse").await;
+        assert!(!empty.ok);
+        assert!(empty.detail.contains("no SSE"));
+
+        let bad_sse = client
+            .chat_stream(&base, None, "bad-chunk", &[LlmMessage::user("hi")], |_| {})
+            .await
+            .unwrap_err();
+        assert!(bad_sse.contains("Malformed"));
+
+        let unauth = client
+            .chat_stream(&base, Some("sk-secret"), "unauth", &[LlmMessage::user("hi")], |_| {})
+            .await
+            .unwrap_err();
+        assert!(unauth.contains("API key") && !unauth.contains("sk-secret"));
+
+        let err500 = client
+            .chat_stream(&base, None, "fail", &[LlmMessage::user("hi")], |_| {})
+            .await
+            .unwrap_err();
+        assert!(err500.contains("boom"));
     }
 }
