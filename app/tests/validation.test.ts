@@ -118,6 +118,10 @@ describe("validateShortcuts & keyEventToAccelerator", () => {
     expect(dup.valid).toBe(false)
     expect(dup.errors.listen).toContain("Duplicates")
     expect(dup.errors.toggleAll).toContain("Duplicates")
+
+    expect(validateAccelerator("AltGr+L")).toContain("Unknown modifier")
+    expect(validateAccelerator("CommandOrControl+MediaTrackNext")).toBeNull()
+    expect(validateAccelerator("CommandOrControl+MediaTrackPrevious")).toBeNull()
   })
 
   it("converts keyboard events to Tauri accelerators", () => {
