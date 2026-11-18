@@ -1,15 +1,32 @@
-import { useState } from "react"
-import { Camera, Captions, Check, EyeOff, MessageSquare, Mic, Pause, Play, Power, Settings, X } from "lucide-react"
-import { DEFAULT_SHORTCUTS } from "@shared/types"
+import { useEffect, useRef, useState } from "react"
+import {
+  Camera,
+  Captions,
+  Check,
+  EyeOff,
+  GripVertical,
+  Loader2,
+  MessageSquare,
+  Mic,
+  Pause,
+  Play,
+  Power,
+  Settings,
+  Square,
+  X
+} from "lucide-react"
+import { DEFAULT_SHORTCUTS, type PanelTab } from "@shared/types"
 import { t } from "@shared/i18n"
 import { api, errorText, shortcutLabel } from "@/lib/api"
 import { useDragToolbar, useElapsed, useFitWindow, useSessionState, useSettings, useWindowsState } from "@/lib/hooks"
-import type { PanelTab } from "@shared/types"
 import { Button } from "@/components/ui/button"
 import { Dot } from "@/components/ui/badge"
+import { Separator } from "@/components/ui/separator"
 import { cn } from "@/lib/utils"
 
-/** The always-on-top toolbar. Everything else hangs off it. */
+type ToolbarAction = "listen" | "pause" | "resume" | "finish" | "cancel" | "screenshot"
+
+/** The always-on-top breathable floating toolbar. Everything else hangs off it. */
 export function MainWindow() {
   const ref = useFitWindow<HTMLDivElement>()
   const session = useSessionState()
@@ -18,128 +35,296 @@ export function MainWindow() {
   const KEYS = settings?.shortcuts ?? DEFAULT_SHORTCUTS
   const elapsed = useElapsed(session.startedAt)
   const dragToolbar = useDragToolbar()
-  const [error, setError] = useState<string | null>(null)
 
-  const run = async (action: () => Promise<unknown>) => {
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<ToolbarAction | null>(null)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const errorTimer = useRef<number | null>(null)
+  const discardTimer = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (errorTimer.current) clearTimeout(errorTimer.current)
+      if (discardTimer.current) clearTimeout(discardTimer.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (session.status === "idle") setConfirmDiscard(false)
+  }, [session.status])
+
+  const showError = (message: string) => {
+    setError(message)
+    if (errorTimer.current) clearTimeout(errorTimer.current)
+    errorTimer.current = window.setTimeout(() => setError(null), 6500)
+  }
+
+  const run = async (actionName: ToolbarAction, action: () => Promise<unknown>) => {
+    if (busy) return
+    setBusy(actionName)
+    setError(null)
     try {
-      setError(null)
       await action()
     } catch (err) {
-      setError(errorText(err))
-      setTimeout(() => setError(null), 6000)
+      showError(errorText(err))
+    } finally {
+      setBusy(null)
     }
   }
 
-  const listen = () =>
-    run(async () => {
+  const listen = () => {
+    if (settings && !settings.transcriberId) {
+      void api.invoke("panel:show", "transcript")
+      showError("Add a Deepgram transcription provider in Settings before listening.")
+      return
+    }
+    void run("listen", async () => {
       await api.invoke("panel:show", "transcript")
       await api.invoke("session:start")
     })
+  }
 
   const finish = () =>
-    run(async () => {
+    void run("finish", async () => {
       const meeting = await api.invoke("session:finish")
-      if (!meeting) return
+      if (!meeting) {
+        showError("No speech was captured yet — session ended.")
+        return
+      }
       await api.invoke("transcripts:reveal")
     })
 
-  const screenshot = () =>
-    run(async () => {
+  const discard = () => {
+    if (!confirmDiscard) {
+      setConfirmDiscard(true)
+      if (discardTimer.current) clearTimeout(discardTimer.current)
+      discardTimer.current = window.setTimeout(() => setConfirmDiscard(false), 3500)
+      return
+    }
+    setConfirmDiscard(false)
+    void run("cancel", () => api.invoke("session:cancel"))
+  }
+
+  const screenshot = () => {
+    if (settings && !settings.brainId) {
+      void api.invoke("panel:show", "answers")
+      showError("Select a brain provider in Settings to analyze your screen.")
+      return
+    }
+    void run("screenshot", async () => {
       await api.invoke("panel:show", "answers")
       await api.invoke("chat:screenshot")
     })
+  }
 
   const showing = (tab: PanelTab) => windows.chat && windows.panelTab === tab
-  const needsSetup = settings !== null && (!settings.transcriberId || !settings.brainId)
+  const needsTranscriber = settings !== null && !settings.transcriberId
+  const needsBrain = settings !== null && !settings.brainId
+  const needsSetup = needsTranscriber || needsBrain
 
   const live = session.status === "recording"
   const paused = session.status === "paused"
   const connecting = session.status === "connecting"
+  const bannerText = error ?? session.notice
 
   return (
-    <div ref={ref} className="inline-block p-1">
-      <div {...dragToolbar} className="glass drag flex h-10 cursor-grab items-center gap-0.5 px-1">
-        <Grip />
-        <Button variant="ghost" size="icon" onClick={() => void api.invoke("windows:toggle-all")} title={t("Hide all windows ({shortcut})", { shortcut: shortcutLabel(KEYS.toggleAll) })}>
+    <div ref={ref} className="inline-block p-1.5">
+      <div
+        {...dragToolbar}
+        className="studio-toolbar flex h-12 cursor-grab items-center gap-1.5 px-2.5 active:cursor-grabbing"
+      >
+        <DragHandle />
+
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => void api.invoke("windows:toggle-all")}
+          aria-label={t("Hide all windows ({shortcut})", { shortcut: shortcutLabel(KEYS.toggleAll) })}
+          title={t("Hide all windows ({shortcut})", { shortcut: shortcutLabel(KEYS.toggleAll) })}
+        >
           <EyeOff className="h-4 w-4" />
         </Button>
 
-        <Divider />
+        <Separator orientation="vertical" className="mx-0.5 h-5" />
 
         {session.status === "idle" ? (
-          <Button variant="ghost" size="md" onClick={listen} title={t("Start listening ({shortcut})", { shortcut: shortcutLabel(KEYS.listen) })}>
-            <Mic className="h-4 w-4" />
-            {t("Listen")}
+          <Button
+            variant={needsTranscriber ? "outline" : "default"}
+            size="default"
+            disabled={busy !== null}
+            onClick={listen}
+            className="gap-2 px-3.5 text-[13px] font-semibold"
+            title={t("Start listening ({shortcut})", { shortcut: shortcutLabel(KEYS.listen) })}
+          >
+            {busy === "listen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
+            <span>{t("Listen")}</span>
           </Button>
         ) : (
           <div className="flex items-center gap-1">
             <Button
               variant={showing("transcript") ? "secondary" : "ghost"}
-              size="md"
-              className={cn("gap-1.5 text-xs tabular-nums", live ? "text-rose-300" : "text-white/70")}
+              size="default"
+              className={cn(
+                "gap-2 px-3 text-[13px] font-medium tabular-nums",
+                live ? "text-rose-300" : paused ? "text-amber-300" : "text-sky-300"
+              )}
               onClick={() => void api.invoke("panel:toggle", "transcript")}
               title={showing("transcript") ? t("Hide the live transcript") : t("Show the live transcript")}
             >
-              <Dot className={cn(live && "animate-pulse bg-rose-400", paused && "bg-amber-400", connecting && "animate-pulse bg-sky-400")} />
-              {elapsed}
+              <Dot className={cn("h-2 w-2", live && "animate-pulse bg-rose-400", paused && "bg-amber-400", connecting && "animate-pulse bg-sky-400")} />
+              <span>{elapsed}</span>
               <Captions className="h-4 w-4 opacity-80" />
             </Button>
+
             {live && (
-              <Button variant="ghost" size="icon" onClick={() => run(() => api.invoke("session:pause"))} title={t("Pause")}>
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={busy !== null}
+                onClick={() => void run("pause", () => api.invoke("session:pause"))}
+                aria-label={t("Pause")}
+                title={t("Pause")}
+              >
                 <Pause className="h-4 w-4" />
               </Button>
             )}
             {paused && (
-              <Button variant="ghost" size="icon" onClick={() => run(() => api.invoke("session:resume"))} title={t("Resume")}>
-                <Play className="h-4 w-4" />
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={busy !== null}
+                onClick={() => void run("resume", () => api.invoke("session:resume"))}
+                aria-label={t("Resume")}
+                title={t("Resume")}
+              >
+                <Play className="h-4 w-4 text-emerald-300" />
               </Button>
             )}
-            <Button variant="ghost" size="icon" className="text-emerald-300 hover:text-emerald-200" onClick={finish} title={t("Finish and save meeting")}>
-              <Check className="h-4 w-4" />
+
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={busy !== null}
+              className="text-emerald-300 hover:bg-emerald-500/15 hover:text-emerald-200"
+              onClick={finish}
+              aria-label={t("Finish and save meeting")}
+              title={t("Finish and save meeting")}
+            >
+              {busy === "finish" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-3.5 w-3.5 fill-current" />}
             </Button>
-            <Button variant="ghost" size="icon" className="text-white/50" onClick={() => run(() => api.invoke("session:cancel"))} title={t("Discard session")}>
-              <X className="h-4 w-4" />
+
+            <Button
+              variant={confirmDiscard ? "destructive" : "ghost"}
+              size={confirmDiscard ? "sm" : "icon"}
+              disabled={busy !== null}
+              className={cn(!confirmDiscard && "text-muted-foreground hover:text-rose-200")}
+              onClick={discard}
+              aria-label={confirmDiscard ? "Confirm discard session" : t("Discard session")}
+              title={confirmDiscard ? "Click again to discard without saving" : t("Discard session")}
+            >
+              {confirmDiscard ? (
+                <>
+                  <X className="h-3.5 w-3.5" />
+                  <span>Discard?</span>
+                </>
+              ) : (
+                <X className="h-4 w-4" />
+              )}
             </Button>
           </div>
         )}
 
-        <Divider />
+        <Separator orientation="vertical" className="mx-0.5 h-5" />
 
-        <Button variant={showing("answers") ? "secondary" : "ghost"} size="icon" onClick={() => void api.invoke("panel:toggle", "answers")} title={t("Answers and chat ({shortcut})", { shortcut: shortcutLabel(KEYS.chat) })}>
+        <Button
+          variant={showing("answers") ? "secondary" : "ghost"}
+          size="default"
+          onClick={() => void api.invoke("panel:toggle", "answers")}
+          className="gap-1.5 px-3 text-[13px]"
+          title={t("Answers and chat ({shortcut})", { shortcut: shortcutLabel(KEYS.chat) })}
+        >
           <MessageSquare className="h-4 w-4" />
+          <span>Workspace</span>
         </Button>
-        <Button variant="ghost" size="icon" onClick={screenshot} title={t("Analyze screen ({shortcut})", { shortcut: shortcutLabel(KEYS.screenshot) })}>
-          <Camera className="h-4 w-4" />
+
+        <Button
+          variant="ghost"
+          size="icon"
+          disabled={busy !== null}
+          onClick={screenshot}
+          aria-label={t("Analyze screen ({shortcut})", { shortcut: shortcutLabel(KEYS.screenshot) })}
+          title={t("Analyze screen ({shortcut})", { shortcut: shortcutLabel(KEYS.screenshot) })}
+        >
+          {busy === "screenshot" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
         </Button>
-        <Button variant={showing("settings") ? "secondary" : "ghost"} size="icon" className="relative" onClick={() => void api.invoke("panel:toggle", "settings")} title={t("Settings")}>
+
+        <Button
+          variant={showing("settings") ? "secondary" : "ghost"}
+          size="icon"
+          className="relative"
+          onClick={() => void api.invoke("panel:toggle", "settings")}
+          aria-label={needsSetup ? `${t("Settings")} — setup required` : t("Settings")}
+          title={needsSetup ? `${t("Settings")} (setup required)` : t("Settings")}
+        >
           <Settings className="h-4 w-4" />
-          {needsSetup && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-amber-400" />}
+          {needsSetup && <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-amber-400 ring-2 ring-[#0f131a]" />}
         </Button>
 
-        <Divider />
+        <Separator orientation="vertical" className="mx-0.5 h-5" />
 
-        <Button variant="ghost" size="icon" className="text-rose-300/80 hover:text-rose-300" onClick={() => void api.invoke("app:quit")} title={t("Quit Meetingly")}>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-rose-300/85 hover:bg-rose-500/15 hover:text-rose-200"
+          onClick={() => void api.invoke("app:quit")}
+          aria-label={t("Quit Meetingly")}
+          title={t("Quit Meetingly")}
+        >
           <Power className="h-4 w-4" />
         </Button>
-        <Grip />
+
+        <DragHandle />
       </div>
-      {(error || session.notice) && (
-        <div className="mt-1 max-w-[520px] truncate rounded-md bg-black/80 px-3 py-1 text-xs text-amber-200">{error ?? session.notice}</div>
+
+      {bannerText && (
+        <div className="mt-1.5 flex max-w-[540px] items-center gap-2 rounded-xl border border-amber-400/30 bg-[#0f131a]/95 px-3 py-2 text-xs text-amber-100 shadow-lg backdrop-blur-xl">
+          <span className="min-w-0 flex-1 truncate" title={bannerText}>
+            {bannerText}
+          </span>
+          {needsSetup && (
+            <button
+              type="button"
+              className="shrink-0 rounded-md bg-amber-400/20 px-2 py-1 text-[11.5px] font-semibold text-amber-100 hover:bg-amber-400/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => {
+                setError(null)
+                void api.invoke("panel:show", "settings")
+              }}
+            >
+              Open settings
+            </button>
+          )}
+          <button
+            type="button"
+            className="shrink-0 rounded p-0.5 text-amber-200/75 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label="Dismiss"
+            onClick={() => setError(null)}
+          >
+            <Check className="h-3.5 w-3.5" />
+          </button>
+        </div>
       )}
     </div>
   )
 }
 
-function Grip() {
+function DragHandle() {
   return (
-    <span aria-hidden className="grid h-6 w-3 shrink-0 grid-cols-2 content-center justify-items-center gap-y-[3px] opacity-25">
-      {[0, 1, 2, 3, 4, 5].map((i) => (
-        <i key={i} className="block h-[2px] w-[2px] rounded-full bg-white" />
-      ))}
+    <span
+      aria-hidden
+      title="Drag toolbar"
+      className="flex h-8 w-5 shrink-0 cursor-grab items-center justify-center rounded-md text-white/35 transition-colors hover:bg-white/[0.06] hover:text-white/70 active:cursor-grabbing"
+    >
+      <GripVertical className="pointer-events-none h-4 w-4" />
     </span>
   )
-}
-
-function Divider() {
-  return <span className="mx-0.5 h-4 w-px bg-white/15" />
 }

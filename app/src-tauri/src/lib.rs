@@ -435,15 +435,23 @@ pub fn run() {
                 })
                 .build(),
         )
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event
-                && window.label() == "main"
-                && let Some(windows) = window.app_handle().try_state::<Arc<WindowManager>>()
-                && !windows.is_quitting()
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. }
+                if window.label() == "main" =>
             {
-                api.prevent_close();
-                windows.hide_all(window.app_handle());
+                if let Some(windows) = window.app_handle().try_state::<Arc<WindowManager>>()
+                    && !windows.is_quitting()
+                {
+                    api.prevent_close();
+                    windows.hide_all(window.app_handle());
+                }
             }
+            WindowEvent::Moved(_) if window.label() == "main" => {
+                if let Some(windows) = window.app_handle().try_state::<Arc<WindowManager>>() {
+                    windows.layout_chat(window.app_handle());
+                }
+            }
+            _ => {}
         })
         .setup(|app| {
             let dir = app.path().app_data_dir().map_err(|e| format!("Could not locate app data directory: {e}"))?;

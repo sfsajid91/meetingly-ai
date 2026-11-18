@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { getCurrentWindow } from "@tauri-apps/api/window"
 import type { EventChannel, EventMap } from "@shared/ipc"
 import type { AudioDevices, Meeting, MigrationOutcome, SessionState, SettingsPatch, SettingsView, SuggestionsState, WindowsState } from "@shared/types"
 import { api } from "./api"
@@ -135,36 +136,21 @@ export function useElapsed(since: number | null): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
 }
 
-/** Pointer-driven native window drag handler for frameless toolbars across Wayland/X11/macOS/Windows. */
+const NO_DRAG_SELECTOR =
+  "button, select, input, textarea, a, label, [role='button'], [role='switch'], [role='tab'], [role='combobox'], [data-no-drag]"
+
+/** Native window drag handler using Tauri's startDragging (works on Wayland, X11, macOS, Windows). */
 export function useDragToolbar() {
-  const drag = useRef<{ x: number; y: number; dx: number; dy: number; frame: number } | null>(null)
-  const end = (e: React.PointerEvent<HTMLElement>) => {
-    const d = drag.current
-    if (!d) return
-    cancelAnimationFrame(d.frame)
-    drag.current = null
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
-    void api.invoke("windows:drag", { phase: "move", dx: d.dx, dy: d.dy }).then(() => api.invoke("windows:drag", { phase: "end", dx: 0, dy: 0 }))
-  }
   return {
-    onPointerDown: (e: React.PointerEvent<HTMLElement>) => {
-      if (e.button !== 0 || (e.target as HTMLElement).closest("button, select, input, a, label")) return
-      e.currentTarget.setPointerCapture(e.pointerId)
-      drag.current = { x: e.screenX, y: e.screenY, dx: 0, dy: 0, frame: 0 }
-      void api.invoke("windows:drag", { phase: "start", dx: 0, dy: 0 })
-    },
-    onPointerMove: (e: React.PointerEvent<HTMLElement>) => {
-      const d = drag.current
-      if (!d) return
-      d.dx = e.screenX - d.x
-      d.dy = e.screenY - d.y
-      if (d.frame) return
-      d.frame = requestAnimationFrame(() => {
-        d.frame = 0
-        if (drag.current === d) void api.invoke("windows:drag", { phase: "move", dx: d.dx, dy: d.dy })
-      })
-    },
-    onPointerUp: end,
-    onPointerCancel: end
+    onMouseDown: (e: React.MouseEvent<HTMLElement>) => {
+      if (e.button !== 0) return
+      const target = e.target as HTMLElement | null
+      if (target?.closest(NO_DRAG_SELECTOR)) return
+      if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return
+      e.preventDefault()
+      void getCurrentWindow()
+        .startDragging()
+        .catch(() => {})
+    }
   }
 }

@@ -1,8 +1,82 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-/* Every window is a transparent, frameless surface; the panel draws its own glass. */
+@custom-variant dark (&:is(.dark *));
+
+:root,
+.dark {
+  --background: #161b24;
+  --foreground: #eef2f7;
+  --card: #1e2532;
+  --card-foreground: #eef2f7;
+  --popover: #131821;
+  --popover-foreground: #eef2f7;
+  --primary: #38bdf8;
+  --primary-foreground: #090c11;
+  --secondary: #222a38;
+  --secondary-foreground: #e2e8f0;
+  --muted: #1b212d;
+  --muted-foreground: #94a3b8;
+  --accent: #242e3f;
+  --accent-foreground: #f8fafc;
+  --destructive: #f43f5e;
+  --destructive-foreground: #ffffff;
+  --border: rgba(255, 255, 255, 0.1);
+  --input: rgba(255, 255, 255, 0.14);
+  --ring: #38bdf8;
+  --rail: #0f131a;
+  --radius: 0.625rem;
+}
+
+@theme inline {
+  --font-sans: "Inter Variable", "Segoe UI", system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-rail: var(--rail);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-4xl: 9999px;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  --animate-fade-in: fade-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+}
+
+/* Every window is a transparent, frameless surface; the studio shell draws its own surface. */
 html,
 body,
 #root {
@@ -10,34 +84,32 @@ body,
   padding: 0;
   background: transparent !important;
   overflow: hidden;
-  color: rgb(255 255 255 / 0.92);
-  /* Bundled (offline): Inter with optical sizing, crisp at the small sizes the panel uses. */
-  font-family: "Inter Variable", "Segoe UI", system-ui, sans-serif;
+  color: var(--foreground);
+  font-family: var(--font-sans);
   font-optical-sizing: auto;
   font-feature-settings: "cv11", "ss03";
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   user-select: none;
+  color-scheme: dark;
+  caret-color: var(--primary);
+}
+
+::selection {
+  background: rgba(56, 189, 248, 0.32);
+  color: #ffffff;
 }
 
 body[data-window="main"] #root {
   width: max-content;
 }
 
-.glass {
-  @apply rounded-xl border border-white/15 bg-black/85 shadow-2xl backdrop-blur-xl;
+.studio-shell {
+  @apply rounded-2xl border border-white/[0.12] bg-[#161b24]/[0.97] shadow-[0_24px_60px_-16px_rgba(0,0,0,0.85)] backdrop-blur-2xl;
 }
 
-.drag {
-  -webkit-app-region: drag;
-}
-.no-drag,
-button,
-input,
-textarea,
-select,
-a {
-  -webkit-app-region: no-drag;
+.studio-toolbar {
+  @apply rounded-2xl border border-white/[0.13] bg-[#0f131a]/[0.96] shadow-[0_18px_40px_-12px_rgba(0,0,0,0.8)] backdrop-blur-2xl;
 }
 
 .selectable {
@@ -49,14 +121,17 @@ a {
 .scroll {
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgb(255 255 255 / 0.25) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
 }
 .scroll::-webkit-scrollbar {
   width: 6px;
 }
 .scroll::-webkit-scrollbar-thumb {
-  background: rgb(255 255 255 / 0.25);
+  background: rgba(255, 255, 255, 0.2);
   border-radius: 3px;
+}
+.scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.34);
 }
 .scroll::-webkit-scrollbar-track {
   background: transparent;
@@ -64,27 +139,27 @@ a {
 
 /* Rendered assistant text. */
 .md p {
-  margin: 0 0 0.5em;
+  margin: 0 0 0.6em;
 }
 .md p:last-child {
   margin-bottom: 0;
 }
 .md ul,
 .md ol {
-  margin: 0 0 0.5em 1.1em;
+  margin: 0 0 0.6em 1.2em;
   list-style: disc;
 }
 .md ol {
   list-style: decimal;
 }
 .md li {
-  margin: 0.15em 0;
+  margin: 0.2em 0;
 }
 .md code {
-  @apply rounded bg-white/10 px-1 py-0.5 font-mono text-[12px] text-amber-200;
+  @apply rounded bg-white/10 px-1.5 py-0.5 font-mono text-[12.5px] text-amber-200;
 }
 .md pre {
-  @apply my-2 overflow-x-auto rounded-md border border-white/10 bg-black/60 p-3 font-mono text-[12px] leading-relaxed text-emerald-200;
+  @apply my-2.5 overflow-x-auto rounded-lg border border-white/10 bg-[#0b0e14] p-3.5 font-mono text-[12.5px] leading-relaxed text-emerald-200;
 }
 .md pre code {
   background: transparent;
@@ -94,11 +169,20 @@ a {
 .md strong {
   @apply font-semibold text-white;
 }
+.md a {
+  @apply text-sky-300 underline underline-offset-4 hover:text-sky-200;
+}
 
-input[type="password"],
-input[type="text"],
-input[type="search"],
-textarea,
-select {
-  color-scheme: dark;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+  .animate-pulse,
+  .animate-fade-in {
+    animation: none !important;
+  }
 }

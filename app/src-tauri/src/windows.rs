@@ -7,7 +7,6 @@ use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalP
 const PANEL_OVERLAP: f64 = 4.0;
 const MAIN_TOP_MARGIN: f64 = 40.0;
 const MOVE_STEP: i32 = 48;
-const SUGGESTIONS_WIDTH: f64 = 200.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,9 +113,9 @@ impl WindowManager {
         };
         let win = WebviewWindowBuilder::new(app, "chat", WebviewUrl::App("index.html#/chat".into()))
             .title("Meetingly")
-            .inner_size(528.0 + extra, 380.0)
-            .min_inner_size(380.0 + extra, 220.0)
-            .max_inner_size(900.0 + extra, 800.0)
+            .inner_size(920.0 + extra, 640.0)
+            .min_inner_size(640.0 + extra, 440.0)
+            .max_inner_size(1440.0 + extra, 1000.0)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -225,28 +224,8 @@ impl WindowManager {
         self.emit_state(app);
     }
 
-    pub fn set_suggestions_rail(&self, app: &AppHandle, visible: bool) {
-        let px = if visible { SUGGESTIONS_WIDTH } else { 0.0 };
-        let delta = {
-            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let d = px - g.panel_extra;
-            if d == 0.0 {
-                return;
-            }
-            g.panel_extra = px;
-            d
-        };
-        if let Some(win) = app.get_webview_window("chat")
-            && let Ok(size) = win.inner_size()
-            && let Ok(scale) = win.scale_factor()
-        {
-            let logical_w = (size.width as f64 / scale + delta).clamp(380.0 + px, 900.0 + px);
-            let logical_h = (size.height as f64 / scale).clamp(220.0, 800.0);
-            let _ = win.set_min_size(Some(LogicalSize::new(380.0 + px, 220.0)));
-            let _ = win.set_max_size(Some(LogicalSize::new(900.0 + px, 800.0)));
-            let _ = win.set_size(LogicalSize::new(logical_w, logical_h));
-            self.layout_chat(app);
-        }
+    pub fn set_suggestions_rail(&self, _app: &AppHandle, _visible: bool) {
+        // Suggestions now render inline inside the spacious workspace pane; no window resize needed.
     }
 
     pub fn hide_all(&self, app: &AppHandle) {
@@ -326,10 +305,10 @@ impl WindowManager {
     pub fn fit(&self, app: &AppHandle, label: &str, width: f64, height: f64) {
         let Some(win) = app.get_webview_window(label) else { return };
         let (w, h) = if label == "main" {
-            (width.clamp(200.0, 900.0), height.clamp(32.0, 120.0))
+            (width.clamp(260.0, 960.0), height.clamp(40.0, 150.0))
         } else {
             let extra = self.inner.lock().unwrap_or_else(|e| e.into_inner()).panel_extra;
-            (width.clamp(380.0 + extra, 900.0 + extra), height.clamp(220.0, 800.0))
+            (width.clamp(640.0 + extra, 1440.0 + extra), height.clamp(440.0, 1000.0))
         };
         let _ = win.set_size(LogicalSize::new(w, h));
         if label == "main" {
@@ -388,7 +367,7 @@ impl WindowManager {
         })
     }
 
-    fn layout_chat(&self, app: &AppHandle) {
+    pub fn layout_chat(&self, app: &AppHandle) {
         let Some(main) = app.get_webview_window("main") else { return };
         let Some(chat) = app.get_webview_window("chat") else { return };
         let (Ok(m_pos), Ok(m_size), Ok(c_size)) = (main.outer_position(), main.outer_size(), chat.outer_size()) else {

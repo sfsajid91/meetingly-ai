@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-18T02:56:00Z",
+  "title": "Design System: Meetingly — Atelier Obsidian",
+  "extensions": {
+    "colorMeta": {
+      "studio-sky": {
+        "role": "primary",
+        "displayName": "Studio Sky",
+        "canonical": "#38bdf8",
+        "tonalRamp": ["#082f49", "#0c4a6e", "#075985", "#0284c7", "#0ea5e9", "#38bdf8", "#7dd3fc", "#e0f2fe"]
+      },
+      "obsidian-rail": {
+        "role": "neutral",
+        "displayName": "Obsidian Rail",
+        "canonical": "#0f131a",
+        "tonalRamp": ["#090c11", "#0f131a", "#131720", "#161b24", "#1e2532", "#2b3446", "#64748b", "#eef2f7"]
+      },
+      "graphite-canvas": {
+        "role": "neutral",
+        "displayName": "Graphite Canvas",
+        "canonical": "#161b24",
+        "tonalRamp": ["#0f131a", "#131720", "#161b24", "#1c222e", "#222a38", "#334155", "#94a3b8", "#f8fafc"]
+      },
+      "live-rose": {
+        "role": "semantic",
+        "displayName": "Live Rose",
+        "canonical": "#f43f5e",
+        "tonalRamp": ["#4c0519", "#881337", "#be123c", "#e11d48", "#f43f5e", "#fb7185", "#fda4af", "#ffe4e6"]
+      }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Workspace Headline", "purpose": "Header ribbon titles and meeting detail titles." },
+      "title": { "displayName": "Answer Lead-In", "purpose": "Bold first-sentence answer summary and card headers." },
+      "body": { "displayName": "Studio Body", "purpose": "Answers, transcript turns, and settings descriptions." },
+      "label": { "displayName": "Rail & Form Label", "purpose": "Uppercase section dividers and form labels." }
+    },
+    "shadows": [
+      {
+        "name": "studio-shell",
+        "value": "0 24px 60px -16px rgba(0, 0, 0, 0.85)",
+        "purpose": "Outer floating window separation over desktop wallpaper and IDE windows."
+      },
+      {
+        "name": "studio-toolbar",
+        "value": "0 18px 40px -12px rgba(0, 0, 0, 0.8)",
+        "purpose": "Always-on-top floating toolbar separation."
+      }
+    ],
+    "motion": [
+      {
+        "name": "animate-fade-in",
+        "value": "0.18s cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Subtle reveal for newly appended or streamed answer cards, disabled under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      { "name": "md", "value": "768px" },
+      { "name": "workspace-split", "value": "840px" },
+      { "name": "lg", "value": "1024px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "High-contrast primary action button for Start listening, Send, and Save.",
+      "html": "<button class=\"ds-btn-primary\">Start listening</button>",
+      "css": ".ds-btn-primary { display:inline-flex; align-items:center; justify-content:center; gap:6px; height:32px; padding:8px 14px; border-radius:8px; border:1px solid transparent; background:#38bdf8; color:#090c11; font-size:13px; font-weight:600; cursor:pointer; transition:background 0.15s; } .ds-btn-primary:hover { background:rgba(56,189,248,0.85); } .ds-btn-primary:focus-visible { outline:2px solid #38bdf8; outline-offset:2px; }"
+    },
+    {
+      "name": "Stop Listening Button",
+      "kind": "button",
+      "refersTo": "button-destructive",
+      "description": "High-contrast destructive action button for Stop listening and delete confirmation.",
+      "html": "<button class=\"ds-btn-destructive\">Stop listening</button>",
+      "css": ".ds-btn-destructive { display:inline-flex; align-items:center; justify-content:center; gap:6px; height:28px; padding:6px 12px; border-radius:8px; border:1px solid rgba(251,113,133,0.25); background:rgba(244,63,94,0.2); color:#ffe4e6; font-size:12.5px; font-weight:500; cursor:pointer; transition:background 0.15s; } .ds-btn-destructive:hover { background:rgba(244,63,94,0.3); } .ds-btn-destructive:focus-visible { outline:2px solid rgba(251,113,133,0.5); outline-offset:2px; }"
+    },
+    {
+      "name": "Answer Card",
+      "kind": "card",
+      "refersTo": "answer-card",
+      "description": "Elevated graphite card for streamed AI answers with 68ch readable measure.",
+      "html": "<div class=\"ds-answer-card\"><strong>Use a transactional outbox table.</strong><p>Commit the domain row and event inside the same Postgres transaction.</p></div>",
+      "css": ".ds-answer-card { max-width:68ch; border-radius:12px; border:1px solid rgba(56,189,248,0.2); background:#1e2532; padding:20px; color:#eef2f7; font-size:14px; line-height:1.6; } .ds-answer-card strong { display:block; font-size:15.5px; font-weight:600; color:#fff; margin-bottom:6px; }"
+    },
+    {
+      "name": "Rail Navigation Item",
+      "kind": "nav",
+      "refersTo": "button-secondary",
+      "description": "Left obsidian rail navigation button with active page state.",
+      "html": "<button class=\"ds-nav-item ds-nav-active\" aria-current=\"page\">Live Workspace</button>",
+      "css": ".ds-nav-item { display:flex; align-items:center; width:100%; height:36px; padding:0 10px; border-radius:8px; border:none; background:transparent; color:#94a3b8; font-size:13.5px; font-weight:500; cursor:pointer; text-align:left; transition:background 0.15s, color 0.15s; } .ds-nav-item:hover { background:rgba(255,255,255,0.05); color:#eef2f7; } .ds-nav-active { background:#1e293b; color:#38bdf8; } .ds-nav-item:focus-visible { outline:2px solid #38bdf8; outline-offset:2px; }"
+    },
+    {
+      "name": "Studio Text Input",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Recessed obsidian input field used in settings, provider forms, and search.",
+      "html": "<input class=\"ds-input\" placeholder=\"https://api.openai.com/v1\" />",
+      "css": ".ds-input { width:100%; height:36px; padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.14); background:#0f131a; color:#eef2f7; font-size:13px; outline:none; transition:border-color 0.15s; } .ds-input::placeholder { color:#94a3b8; } .ds-input:focus { border-color:#38bdf8; box-shadow:0 0 0 3px rgba(56,189,248,0.2); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Obsidian Briefing Desk",
+    "overview": "Atelier Obsidian transforms Meetingly from a cramped floating popup into a calm, spacious desktop studio built for engineers, founders, and candidates on live video calls. A deep matte obsidian navigation rail grounds the workspace, separating navigation and local-keychain status from the graphite live-reading canvas so answers and incoming speech stay scannable at a glance without visual glare.\n\nEvery surface earns its space: generous padding (20px–24px), a restrained single primary sky accent, crisp 1px hairlines instead of heavy drop shadows, and a dual-column live workspace that keeps real-time AI answers beside the live speaker transcript.",
+    "keyCharacteristics": [
+      "Deep tonal layering across matte obsidian rail (#0f131a), graphite canvas (#161b24), and elevated answer cards (#1e2532).",
+      "Spacious dual-window architecture: a breathable 48px always-on-top toolbar paired with a 920×640 studio workspace.",
+      "Single primary accent (#38bdf8) reserved strictly for primary actions, active navigation, and live focus rings.",
+      "High-legibility 14px body prose constrained to 68ch measure with bold 15.5px lead-in answer lines."
+    ],
+    "rules": [
+      {
+        "name": "The One-Accent Rule",
+        "body": "Studio Sky (#38bdf8) marks primary actions, active navigation, and focus indicators only; live capture states use Rose (#f43f5e), ready/saved states use Emerald (#34d399), and setup warnings use Amber (#fbbf24).",
+        "section": "colors"
+      },
+      {
+        "name": "The Tabular Numerals Rule",
+        "body": "Every live clock, meeting duration, segment counter, and character counter uses tabular-nums so horizontal alignment never shifts while counting.",
+        "section": "typography"
+      },
+      {
+        "name": "The Single-Elevation Rule",
+        "body": "Declare interior card elevation with either a 1px border or a shadow, never both simultaneously (no ghost cards).",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep 68ch max prose measure and 20px internal padding on streamed answer cards so answers remain readable while speaking.",
+      "Do validate provider URLs, required API keys, prompt text, and duplicate shortcuts upfront with inline field errors before IPC submission.",
+      "Do preserve data-no-drag on interactive header controls and getCurrentWindow().startDragging() on frameless window drag regions.",
+      "Do require AlertDialog confirmation before discarding non-empty live transcripts, clearing chat, or deleting providers/prompts/meetings."
+    ],
+    "donts": [
+      "Don't crowd toggles or secondary pills into the 56px live session header ribbon—keep it focused on view title, live state, session controls, and close.",
+      "Don't combine a 1px border with a drop shadow on interior cards.",
+      "Don't add decorative looping animations that ignore prefers-reduced-motion: reduce.",
+      "Don't omit keyboard focus-visible rings on custom buttons or aria-label on icon-only controls."
+    ]
+  }
+}

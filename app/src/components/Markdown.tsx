@@ -4,5 +4,5 @@ import { cn } from "@/lib/utils"
 
 export function Markdown({ text, className }: { text: string; className?: string }) {
   const html = useMemo(() => renderMarkdown(text), [text])
-  return <div className={cn("md selectable text-[13px] leading-relaxed text-white/90", className)} dangerouslySetInnerHTML={{ __html: html }} />
+  return <div className={cn("md selectable text-[14px] leading-[1.6] text-foreground/95", className)} dangerouslySetInnerHTML={{ __html: html }} />
 }
