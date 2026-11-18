@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react"
+import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertCircle,
+  ArrowDown,
   Camera,
   Check,
   CircleHelp,
@@ -49,14 +50,17 @@ import {
   type LanguageCode,
   type PanelTab,
   type QuickActionId,
+  type SessionState,
   type SettingsPatch,
   type SettingsView,
-  type SuggestionsState
+  type SuggestionsState,
+  type Utterance
 } from "@shared/types"
 import { t } from "@shared/i18n"
 import { api, errorText, shortcutLabel } from "@/lib/api"
 import { useAudioLevels, useLiveTranscript, type Interim, type TranscriptLine } from "@/lib/capture"
 import { useAudioDevices, useDragToolbar, useElapsed, useEvent, useSessionState, useSettings, useSuggestions } from "@/lib/hooks"
+import { buildAnswerTurns, computeAnswerScrollTop, selectHeardUtterance, type AnswerTurn } from "@/lib/turns"
 import { CHAT_MESSAGE_MAX_LENGTH, getSessionReadiness, validateChatMessage } from "@/lib/validation"
 import { cn, copyText } from "@/lib/utils"
 import { markdownToPlain } from "@/lib/plain-text"
@@ -80,7 +84,12 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Markdown } from "@/components/Markdown"
-import { MeetingsHistory, PromptsSettings, ProvidersSettings, ShortcutsSettings } from "@/components/SettingsPanels"
+
+const loadSettingsPanels = () => import("@/components/SettingsPanels")
+const ProvidersSettings = lazy(() => loadSettingsPanels().then((m) => ({ default: m.ProvidersSettings })))
+const PromptsSettings = lazy(() => loadSettingsPanels().then((m) => ({ default: m.PromptsSettings })))
+const ShortcutsSettings = lazy(() => loadSettingsPanels().then((m) => ({ default: m.ShortcutsSettings })))
+const MeetingsHistory = lazy(() => loadSettingsPanels().then((m) => ({ default: m.MeetingsHistory })))
 
 type SettingsSubTab = "general" | "providers" | "prompts" | "shortcuts" | "meetings"
 type SessionAction = "start" | "stop" | "pause" | "resume" | "discard"
@@ -108,11 +117,9 @@ export function PanelWindow() {
   const [sessionError, setSessionError] = useState<string | null>(null)
   const [sessionNotice, setSessionNotice] = useState<string | null>(null)
 
-  const levels = useAudioLevels(session)
   const transcript = useLiveTranscript(session)
   const suggestions = useSuggestions()
   const { devices, loading: devicesLoading, error: devicesError, refresh: refreshDevices } = useAudioDevices()
-  const elapsed = useElapsed(session.startedAt)
   const dragToolbar = useDragToolbar()
 
   useEffect(() => {
@@ -135,7 +142,10 @@ export function PanelWindow() {
 
   const openProviders = () => choose("settings", "providers")
 
-  const readiness = getSessionReadiness(settings, devices, devicesLoading)
+  const readiness = useMemo(
+    () => getSessionReadiness(settings, devices, devicesLoading),
+    [settings, devices, devicesLoading]
+  )
   const handsFree = settings ? settings.autoAnswer !== "off" : false
   const railSuggestions = suggestionsVisible(settings, session.status)
   const needsSetup = settings !== null && (!settings.transcriberId || !settings.brainId)
@@ -344,13 +354,13 @@ export function PanelWindow() {
                     />
                     <span>{session.status === "recording" ? "Live" : session.status === "paused" ? "Paused" : "Connecting"}</span>
                     <span>·</span>
-                    <span>{elapsed}</span>
+                    <ElapsedText startedAt={session.startedAt} />
                   </Badge>
                 )}
               </div>
 
               <div data-no-drag className="ml-auto flex shrink-0 items-center gap-2">
-                {session.status !== "idle" && <Levels levels={levels} />}
+                {session.status !== "idle" && <LiveLevels session={session} />}
 
                 {session.status === "idle" && tab !== "settings" && (
                   <Button
@@ -542,19 +552,20 @@ export function PanelWindow() {
               </div>
             )}
 
-            <main className="flex min-h-0 flex-1 flex-col">
+            <main className="flex min-h-0 min-w-0 flex-1 flex-col">
               {tab === "answers" && (
-                <div className="grid min-h-0 flex-1 grid-cols-1 min-[840px]:grid-cols-[1.18fr_0.82fr]">
-                  <div className="flex min-h-0 flex-col">
+                <div className="grid min-h-0 min-w-0 flex-1 grid-cols-1 min-[840px]:grid-cols-[minmax(0,1.28fr)_minmax(0,0.82fr)]">
+                  <div className="flex min-h-0 min-w-0 flex-col">
                     <Answers
                       listening={session.status !== "idle"}
                       handsFree={handsFree}
                       settings={settings}
                       onToggleAutoAnswer={() => void update({ autoAnswer: handsFree ? "off" : "questions" })}
+                      onAnswerLengthChange={(answerLength) => void update({ answerLength })}
                       onOpenProviders={openProviders}
                     />
                   </div>
-                  <aside className="hidden min-h-0 flex-col border-l border-white/[0.08] bg-[#121720] min-[840px]:flex">
+                  <aside className="hidden min-h-0 min-w-0 flex-col overflow-hidden border-l border-white/[0.08] bg-[#121720] min-[840px]:flex">
                     <WorkspaceSidePane
                       status={session.status}
                       connected={session.connected}
@@ -680,7 +691,7 @@ function WorkspaceSidePane({
   useEvent("chat:busy", setBusy)
 
   const live = [interim.them, interim.you, interim.other].filter(Boolean).join(" ")
-  const turns = toTurns(lines)
+  const turns = useMemo(() => toTurns(lines), [lines])
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
@@ -691,10 +702,10 @@ function WorkspaceSidePane({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] px-4">
-        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           {status === "idle" ? "Call & Quick Actions" : "Live Transcript"}
         </span>
-        <div className="flex items-center gap-2.5">
+        <div className="flex shrink-0 items-center gap-2.5">
           {status !== "idle" && (
             <Tooltip>
               <TooltipTrigger
@@ -838,17 +849,34 @@ function WorkspaceSidePane({
   )
 }
 
+const FOLLOW_UPS: { label: string; prompt: string }[] = [
+  {
+    label: "Shorter",
+    prompt: "Make that answer shorter: one crisp spoken sentence and 2 short talking points."
+  },
+  {
+    label: "Example",
+    prompt: "Give one concrete example I can say out loud to back that up."
+  },
+  {
+    label: "Deeper",
+    prompt: "Go one level deeper on key tradeoffs and likely interviewer follow-ups."
+  }
+]
+
 function Answers({
   listening,
   handsFree,
   settings,
   onToggleAutoAnswer,
+  onAnswerLengthChange,
   onOpenProviders
 }: {
   listening: boolean
   handsFree: boolean
   settings: SettingsView | null
   onToggleAutoAnswer: () => void
+  onAnswerLengthChange: (answerLength: AnswerLength) => void
   onOpenProviders: () => void
 }) {
   const [history, setHistory] = useState<ChatMessage[]>([])
@@ -856,50 +884,201 @@ function Answers({
   const [busy, setBusy] = useState(false)
   const [input, setInput] = useState("")
   const [inputError, setInputError] = useState<string | null>(null)
-  const [heard, setHeard] = useState<string | null>(null)
+  const [heardUtterance, setHeardUtterance] = useState<Utterance | null>(null)
+  const [userScrolledUp, setUserScrolledUp] = useState(false)
+
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const activeTurnRef = useRef<HTMLDivElement | null>(null)
+  const turnRefs = useRef<(HTMLDivElement | null)[]>([])
+  const pendingChunkRef = useRef<ChatChunk | null>(null)
+  const rafRef = useRef<number | null>(null)
+  const lastTargetScrollRef = useRef(0)
+  const programmaticScrollRef = useRef(false)
+
   const KEYS = settings?.shortcuts ?? DEFAULT_SHORTCUTS
+  const audioSource = settings?.audioSource ?? "both"
+
+  const cancelPendingFrame = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+  }, [])
+
+  const flushChunk = useCallback(() => {
+    rafRef.current = null
+    if (pendingChunkRef.current) {
+      setStream(pendingChunkRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     void api.invoke("chat:history").then(setHistory)
-    void api.invoke("session:last-utterance").then((u) => setHeard(u?.text ?? null))
+    void api.invoke("session:last-utterance").then((u) => setHeardUtterance(u ?? null))
     inputRef.current?.focus()
-  }, [])
+    return () => cancelPendingFrame()
+  }, [cancelPendingFrame])
+
   useEvent("chat:message", (m) => {
     setHistory((h) => [...h, m])
-    setStream(null)
+    if (m.role === "assistant") {
+      pendingChunkRef.current = null
+      cancelPendingFrame()
+      setStream(null)
+    }
   })
-  useEvent("chat:chunk", (c) => setStream((s) => (s && s.id === c.id ? { id: c.id, text: s.text + c.text } : c)))
-  useEvent("chat:busy", setBusy)
+
+  useEvent("chat:chunk", (c) => {
+    const prev = pendingChunkRef.current
+    pendingChunkRef.current =
+      prev && prev.id === c.id ? { id: c.id, text: prev.text + c.text, kind: c.kind ?? prev.kind } : c
+    if (rafRef.current === null) {
+      rafRef.current = requestAnimationFrame(flushChunk)
+    }
+  })
+
+  useEvent("chat:busy", (next) => {
+    setBusy(next)
+    if (!next) {
+      pendingChunkRef.current = null
+      cancelPendingFrame()
+      setStream(null)
+    }
+  })
+
   useEvent("chat:cleared", () => {
+    pendingChunkRef.current = null
+    cancelPendingFrame()
     setHistory([])
     setStream(null)
+    setUserScrolledUp(false)
   })
-  useEvent("session:utterance", (u) => setHeard(u.text))
+
+  useEvent("session:utterance", (u) => {
+    setHeardUtterance((prev) => selectHeardUtterance(prev, u, audioSource))
+  })
+
   useEvent("session:state", (s) => {
-    if (s.status === "idle") setHeard(null)
+    if (s.status === "idle") setHeardUtterance(null)
   })
+
+  const turns = useMemo(() => buildAnswerTurns(history, stream, busy), [history, stream, busy])
+  const latestTurn = useMemo(() => turns.find((item) => item.isLatest) ?? turns[turns.length - 1] ?? null, [turns])
+  const latestTurnKey = latestTurn?.id ?? null
+
+  turnRefs.current.length = turns.length
+  if (!turns.some((item) => item.isLatest)) {
+    activeTurnRef.current = null
+  }
+
+  const registerTurnElement = useCallback((index: number, isLatest: boolean, el: HTMLDivElement | null) => {
+    turnRefs.current[index] = el
+    if (isLatest) activeTurnRef.current = el
+  }, [])
+
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
-  }, [history.length, stream?.text.length])
+    setUserScrolledUp(false)
+  }, [latestTurnKey])
+
+  useEffect(() => {
+    const listEl = listRef.current
+    if (!listEl || userScrolledUp) return
+    const activeEl = activeTurnRef.current
+    const activeTurnTop = activeEl
+      ? activeEl.getBoundingClientRect().top - listEl.getBoundingClientRect().top + listEl.scrollTop
+      : null
+    const target = computeAnswerScrollTop(
+      {
+        scrollTop: listEl.scrollTop,
+        clientHeight: listEl.clientHeight,
+        scrollHeight: listEl.scrollHeight,
+        activeTurnTop
+      },
+      userScrolledUp
+    )
+    if (target === null || Math.abs(listEl.scrollTop - target) < 2) return
+    lastTargetScrollRef.current = target
+    programmaticScrollRef.current = true
+    listEl.scrollTo({ top: target })
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false
+    })
+  }, [turns.length, latestTurnKey, stream?.text.length, busy, userScrolledUp])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return
+      const listEl = listRef.current
+      const items = turnRefs.current.filter((el): el is HTMLDivElement => el !== null)
+      if (!listEl || items.length === 0) return
+      e.preventDefault()
+      const listTop = listEl.getBoundingClientRect().top
+      const currentIdx = items.findIndex((el) => el.getBoundingClientRect().bottom > listTop + 24)
+      const base = currentIdx === -1 ? items.length - 1 : currentIdx
+      const nextIdx = e.key === "ArrowUp" ? Math.max(0, base - 1) : Math.min(items.length - 1, base + 1)
+      setUserScrolledUp(nextIdx < items.length - 1)
+      items[nextIdx]?.scrollIntoView({ block: "start", behavior: "smooth" })
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [])
+
+  const handleScroll = () => {
+    if (programmaticScrollRef.current) return
+    const el = listRef.current
+    if (!el) return
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    const nearTarget = lastTargetScrollRef.current > 0 && Math.abs(el.scrollTop - lastTargetScrollRef.current) <= 28
+    setUserScrolledUp(distFromBottom > 32 && !nearTarget)
+  }
+
+  const jumpToLatest = () => {
+    const el = listRef.current
+    if (!el) return
+    setUserScrolledUp(false)
+    const activeEl = activeTurnRef.current
+    const activeTurnTop = activeEl
+      ? activeEl.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+      : null
+    const target = computeAnswerScrollTop(
+      {
+        scrollTop: el.scrollTop,
+        clientHeight: el.clientHeight,
+        scrollHeight: el.scrollHeight,
+        activeTurnTop
+      },
+      false
+    )
+    if (target === null) return
+    lastTargetScrollRef.current = target
+    programmaticScrollRef.current = true
+    el.scrollTo({ top: target, behavior: "smooth" })
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false
+    })
+  }
 
   const brain = settings?.providers.find((p) => p.id === settings.brainId) ?? null
   const missingBrain = settings !== null && !brain
   const validation = validateChatMessage(input)
 
-  const send = (text: string) => {
-    const check = validateChatMessage(text)
-    if (check.error) {
-      setInputError(check.error)
-      return
-    }
-    if (!check.valid || busy || missingBrain) return
-    setInput("")
-    setInputError(null)
-    void api.invoke("chat:send", text.trim())
-    inputRef.current?.focus()
-  }
+  const send = useCallback(
+    (text: string) => {
+      const check = validateChatMessage(text)
+      if (check.error) {
+        setInputError(check.error)
+        return
+      }
+      if (!check.valid || busy || missingBrain) return
+      setInput("")
+      setInputError(null)
+      setUserScrolledUp(false)
+      void api.invoke("chat:send", text.trim())
+      inputRef.current?.focus()
+    },
+    [busy, missingBrain]
+  )
 
   return (
     <>
@@ -917,51 +1096,63 @@ function Answers({
         </div>
       )}
 
-      <div ref={listRef} className="scroll min-h-0 flex-1 space-y-3.5 px-6 py-5">
-        {history.length === 0 && !stream && (
-          <div className="flex h-full flex-col items-center justify-center gap-4 px-6 py-10 text-center">
-            <div className="space-y-1.5">
-              <h2 className="text-base font-semibold text-white">Real-time meeting answers</h2>
-              <p className="max-w-md text-[13.5px] leading-relaxed text-muted-foreground">
-                {handsFree
-                  ? t("Ask anything, or press Listen: questions from the meeting are answered here.")
-                  : t("Ask anything. Auto-answer is off.")}
-              </p>
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div ref={listRef} onScroll={handleScroll} className="scroll min-h-0 flex-1 space-y-5 px-6 py-5">
+          {turns.length === 0 && (
+            <div className="flex h-full flex-col items-center justify-center gap-4 px-6 py-10 text-center">
+              <div className="space-y-1.5">
+                <h2 className="text-base font-semibold text-white">Real-time meeting answers</h2>
+                <p className="max-w-md text-[13.5px] leading-relaxed text-muted-foreground">
+                  {handsFree
+                    ? t("Ask anything, or press Listen: questions from the meeting are answered here.")
+                    : t("Ask anything. Auto-answer is off.")}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-3 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5">
+                  <Kbd>{shortcutLabel(KEYS.listen)}</Kbd>
+                  <span>{t("Listen")}</span>
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <Kbd>{shortcutLabel(KEYS.screenshot)}</Kbd>
+                  <span>{t("Screen")}</span>
+                </span>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center justify-center gap-3 text-xs text-muted-foreground">
-              <span className="inline-flex items-center gap-1.5">
-                <Kbd>{shortcutLabel(KEYS.listen)}</Kbd>
-                <span>{t("Listen")}</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <Kbd>{shortcutLabel(KEYS.screenshot)}</Kbd>
-                <span>{t("Screen")}</span>
-              </span>
-            </div>
-          </div>
-        )}
-        {history.map((m) => (
-          <Message key={m.id} message={m} />
-        ))}
-        {stream && (
-          <div className={ANSWER}>
-            <Markdown text={stream.text} />
-            <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-sky-300 align-middle" />
-          </div>
-        )}
-        {busy && !stream && (
-          <div className="flex items-center gap-2 px-1 text-[13px] text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
-            <span>{t("Thinking…")}</span>
+          )}
+          {turns.map((turn, index) => (
+            <AnswerTurnCard
+              key={turn.id}
+              turn={turn}
+              index={index}
+              busy={busy}
+              onFollowUp={send}
+              onTurnElement={registerTurnElement}
+            />
+          ))}
+        </div>
+
+        {userScrolledUp && turns.length > 0 && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+            <button
+              type="button"
+              onClick={jumpToLatest}
+              className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-sky-400/45 bg-[#161c26] px-3 py-1.5 text-xs font-medium text-sky-200 transition-colors hover:border-sky-400/65 hover:bg-[#1e2532] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <ArrowDown className="h-3.5 w-3.5" />
+              <span>{t("Jump to latest answer")}</span>
+            </button>
           </div>
         )}
       </div>
 
-      {listening && heard && (
+      {listening && heardUtterance && (
         <div className="flex items-center gap-3 border-t border-white/[0.08] bg-white/[0.02] px-5 py-2.5">
-          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={heard}>
-            <span className="mr-2 font-semibold uppercase tracking-wide text-foreground/60">{t("Heard")}</span>
-            {heard}
+          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={heardUtterance.text}>
+            <span className="mr-2 rounded bg-white/[0.07] px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-sky-300">
+              {heardUtterance.channel === "you" ? t("You") : t("Interviewer")}
+            </span>
+            {heardUtterance.text}
           </span>
           <Button
             variant="secondary"
@@ -975,7 +1166,7 @@ function Answers({
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-2 border-t border-white/[0.08] px-5 py-1.5 text-[11.5px] text-muted-foreground">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.08] px-5 py-1.5 text-[11.5px] text-muted-foreground">
         <span className="min-w-0 flex-1 truncate">
           {brain ? (
             <>
@@ -992,30 +1183,55 @@ function Answers({
             "No brain selected"
           )}
         </span>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <button
-                type="button"
-                onClick={onToggleAutoAnswer}
-                className={cn(
-                  "inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                  handsFree
-                    ? "border-sky-400/35 bg-sky-500/15 text-sky-200 hover:bg-sky-500/25"
-                    : "border-white/10 bg-white/[0.03] text-muted-foreground hover:text-foreground"
-                )}
-              />
-            }
-          >
-            <Sparkles className="h-3 w-3" />
-            <span>{handsFree ? t("Auto-answer on") : t("Auto-answer off")}</span>
-          </TooltipTrigger>
-          <TooltipContent className="max-w-[260px]">
-            {handsFree
-              ? t("Questions heard in the meeting are answered automatically. Click to turn off.")
-              : t("Click to answer questions from the meeting automatically.")}
-          </TooltipContent>
-        </Tooltip>
+
+        <div className="flex shrink-0 items-center gap-2">
+          {settings && (
+            <div role="group" aria-label={t("Answer length")} className="inline-flex items-center rounded-full border border-white/10 bg-[#0f131a] p-0.5">
+              {(["short", "auto", "medium"] as AnswerLength[]).map((len) => {
+                const active = settings.answerLength === len
+                return (
+                  <button
+                    key={len}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => void onAnswerLengthChange(len)}
+                    className={cn(
+                      "rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      active ? "bg-sky-500/20 text-sky-200" : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {len === "auto" ? t("Auto") : t(ANSWER_LENGTHS[len].label)}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  onClick={onToggleAutoAnswer}
+                  className={cn(
+                    "inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    handsFree
+                      ? "border-sky-400/35 bg-sky-500/15 text-sky-200 hover:bg-sky-500/25"
+                      : "border-white/10 bg-white/[0.03] text-muted-foreground hover:text-foreground"
+                  )}
+                />
+              }
+            >
+              <Sparkles className="h-3 w-3" />
+              <span>{handsFree ? t("Auto-answer on") : t("Auto-answer off")}</span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-[260px]">
+              {handsFree
+                ? t("Questions heard in the meeting are answered automatically. Click to turn off.")
+                : t("Click to answer questions from the meeting automatically.")}
+            </TooltipContent>
+          </Tooltip>
+        </div>
       </div>
 
       <form
@@ -1143,63 +1359,160 @@ function Answers({
   )
 }
 
-const ANSWER =
-  "max-w-[68ch] animate-fade-in rounded-xl border border-sky-400/20 bg-[#1e2532] p-5 [&_p:first-child_strong]:text-[15.5px]"
+const AnswerTurnCard = memo(
+  function AnswerTurnCard({
+    turn,
+    index,
+    busy,
+    onFollowUp,
+    onTurnElement
+  }: {
+    turn: AnswerTurn
+    index: number
+    busy: boolean
+    onFollowUp: (prompt: string) => void
+    onTurnElement: (index: number, isLatest: boolean, el: HTMLDivElement | null) => void
+  }) {
+    const [copied, setCopied] = useState(false)
+    const copyTimerRef = useRef<number | null>(null)
 
-function Message({ message }: { message: ChatMessage }) {
-  const [copied, setCopied] = useState(false)
-  if (message.role === "user") {
-    if (message.kind === "auto") {
-      return (
-        <p className="selectable px-1 pt-1 text-[13px] leading-snug text-muted-foreground">
-          <span className="mr-2 text-[11px] font-semibold uppercase tracking-wider text-foreground/50">{t("Heard")}</span>
-          {message.text}
-        </p>
-      )
-    }
-    return (
-      <div className="flex justify-end">
-        <p className="selectable max-w-[82%] rounded-xl bg-white/[0.09] px-4 py-2.5 text-[13.5px] leading-relaxed text-foreground">
-          {message.text}
-        </p>
-      </div>
+    useEffect(() => {
+      return () => {
+        if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+      }
+    }, [])
+
+    const setRootRef = useCallback(
+      (el: HTMLDivElement | null) => {
+        onTurnElement(index, turn.isLatest, el)
+      },
+      [onTurnElement, index, turn.isLatest]
     )
-  }
 
-  const copy = async () => {
-    if (await copyText(markdownToPlain(message.text))) {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1200)
+    const bodyText = turn.response?.text ?? turn.streamingText
+    const isError = turn.response?.kind === "error"
+    const showCard = turn.thinking || bodyText !== null
+
+    const copy = async () => {
+      if (!turn.response) return
+      if (await copyText(markdownToPlain(turn.response.text))) {
+        setCopied(true)
+        if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+        copyTimerRef.current = window.setTimeout(() => setCopied(false), 1200)
+      }
     }
-  }
 
-  return (
-    <div
-      className={cn(
-        "group relative",
-        message.kind === "error" ? "rounded-xl border border-rose-400/25 bg-rose-500/15 px-4 py-3 text-rose-100" : ANSWER
-      )}
-    >
-      {message.kind === "screenshot" && (
-        <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-sky-300/80">
-          <Camera className="h-3.5 w-3.5" /> {t("Screen")}
+    return (
+      <div ref={setRootRef} className="space-y-2">
+      {turn.prompt?.kind === "heard" && (
+        <div className="flex items-baseline gap-2 px-1 text-[13px] leading-snug text-muted-foreground">
+          <span className="shrink-0 rounded bg-white/[0.07] px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-sky-300">
+            {t("Interviewer")}
+          </span>
+          <span className="selectable min-w-0 text-foreground/80">{turn.prompt.text}</span>
         </div>
       )}
-      {message.kind === "error" ? <p className="selectable text-[13.5px]">{message.text}</p> : <Markdown text={message.text} />}
-      {message.kind !== "error" && (
-        <button
-          type="button"
-          onClick={copy}
-          title={t("Copy")}
-          aria-label={t("Copy")}
-          className="absolute right-2.5 top-2.5 rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-white/10 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 group-focus-within:opacity-100"
+
+      {turn.prompt?.kind === "asked" && (
+        <div className="flex justify-end">
+          <p className="selectable max-w-[82%] rounded-xl bg-white/[0.09] px-4 py-2 text-[13.5px] leading-relaxed text-foreground">
+            {turn.prompt.text}
+          </p>
+        </div>
+      )}
+
+      {turn.prompt?.kind === "screen" && (
+        <div className="flex items-center gap-1.5 px-1 text-[11px] font-medium text-sky-300/85">
+          <Camera className="h-3.5 w-3.5" />
+          <span>{t("Screen analysis")}</span>
+        </div>
+      )}
+
+      {showCard && (
+        <div
+          className={cn(
+            "group relative max-w-[68ch]",
+            isError
+              ? "rounded-xl border border-rose-400/25 bg-rose-500/15 px-4 py-3 text-rose-100"
+              : cn(
+                  "rounded-xl border p-5 transition-colors",
+                  turn.isLatest ? "border-sky-400/25 bg-[#1e2532]" : "border-white/[0.08] bg-[#1e2532]/75"
+                )
+          )}
         >
-          {copied ? <Check className="h-3.5 w-3.5 text-emerald-300" /> : <Copy className="h-3.5 w-3.5" />}
-        </button>
+          {turn.thinking && (
+            <div className="space-y-3" aria-busy="true" aria-label={t("Thinking…")}>
+              <div className="h-4 w-4/5 rounded bg-white/[0.09] animate-pulse" />
+              <div className="space-y-2 pt-1">
+                <div className="h-3 w-3/5 rounded bg-white/[0.06] animate-pulse" />
+                <div className="h-3 w-2/3 rounded bg-white/[0.06] animate-pulse" />
+                <div className="h-3 w-1/2 rounded bg-white/[0.06] animate-pulse" />
+              </div>
+            </div>
+          )}
+
+          {!turn.thinking && isError && turn.response && (
+            <p className="selectable text-[13.5px]">{turn.response.text}</p>
+          )}
+
+          {!turn.thinking && !isError && turn.streamingText !== null && (
+            <div>
+              <Markdown text={turn.streamingText} streaming />
+              <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-sky-300 align-middle" />
+            </div>
+          )}
+
+          {!turn.thinking && !isError && turn.streamingText === null && turn.response && (
+            <>
+              <div className="pr-7">
+                <Markdown text={turn.response.text} />
+              </div>
+              <button
+                type="button"
+                onClick={() => void copy()}
+                title={t("Copy")}
+                aria-label={t("Copy")}
+                className={cn(
+                  "absolute right-2.5 top-2.5 rounded-md p-1.5 text-muted-foreground transition-opacity hover:bg-white/10 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  turn.isLatest ? "opacity-70 hover:opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                )}
+              >
+                {copied ? <Check className="h-3.5 w-3.5 text-emerald-300" /> : <Copy className="h-3.5 w-3.5" />}
+              </button>
+
+              {turn.isLatest && !busy && (
+                <div className="mt-3.5 flex flex-wrap items-center gap-1.5 border-t border-white/[0.07] pt-3">
+                  {FOLLOW_UPS.map((f) => (
+                    <button
+                      key={f.label}
+                      type="button"
+                      onClick={() => onFollowUp(f.prompt)}
+                      className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-[11.5px] font-medium text-foreground/80 transition-colors hover:border-sky-400/35 hover:bg-sky-500/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      {t(f.label)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       )}
     </div>
-  )
-}
+    )
+  },
+  (prev, next) =>
+    prev.index === next.index &&
+    prev.onFollowUp === next.onFollowUp &&
+    prev.onTurnElement === next.onTurnElement &&
+    prev.turn.id === next.turn.id &&
+    prev.turn.isLatest === next.turn.isLatest &&
+    prev.turn.thinking === next.turn.thinking &&
+    prev.turn.streamingText === next.turn.streamingText &&
+    prev.turn.streamingKind === next.turn.streamingKind &&
+    prev.turn.response === next.turn.response &&
+    (!next.turn.isLatest || prev.busy === next.busy)
+)
 
 interface Turn {
   side: "you" | "them" | "other"
@@ -1266,7 +1579,7 @@ function TranscriptStudio(props: {
   const micId = settings?.microphoneId ?? ""
   const monitorId = settings?.monitorId ?? ""
 
-  const turns = toTurns(lines)
+  const turns = useMemo(() => toTurns(lines), [lines])
   const text = turns.map((turn) => (turn.label ? `${speakerText(turn.label)}: ${turn.texts.join(" ")}` : turn.texts.join(" "))).join("\n")
   const copy = async () => {
     if (await copyText(text)) {
@@ -1461,7 +1774,10 @@ function SettingsWorkspace({
   devicesError: string | null
   onRefreshDevices: () => void
 }) {
-  const readiness = getSessionReadiness(settings, devices, devicesLoading)
+  const readiness = useMemo(
+    () => getSessionReadiness(settings, devices, devicesLoading),
+    [settings, devices, devicesLoading]
+  )
   const langName = (code: LanguageCode | null) => LANGUAGES.find((l) => l.code === code)?.name ?? "English"
   const micLabel = (id: string) => {
     if (!id) return "Select microphone"
@@ -1645,11 +1961,22 @@ function SettingsWorkspace({
             </SettingRow>
           </div>
         )}
-        {subTab === "providers" && <ProvidersSettings settings={settings} onSettingsChange={onSettingsChange} />}
-        {subTab === "prompts" && <PromptsSettings settings={settings} update={update} />}
-        {subTab === "shortcuts" && <ShortcutsSettings settings={settings} update={update} />}
-        {subTab === "meetings" && <MeetingsHistory />}
+        <Suspense fallback={<SettingsSkeleton />}>
+          {subTab === "providers" && <ProvidersSettings settings={settings} onSettingsChange={onSettingsChange} />}
+          {subTab === "prompts" && <PromptsSettings settings={settings} update={update} />}
+          {subTab === "shortcuts" && <ShortcutsSettings settings={settings} update={update} />}
+          {subTab === "meetings" && <MeetingsHistory />}
+        </Suspense>
       </div>
+    </div>
+  )
+}
+
+function SettingsSkeleton() {
+  return (
+    <div className="space-y-3" aria-busy="true" aria-label="Loading settings">
+      <div className="h-14 rounded-xl border border-white/[0.08] bg-[#1e2532] animate-pulse" />
+      <div className="h-24 rounded-xl border border-white/[0.08] bg-[#1e2532] animate-pulse" />
     </div>
   )
 }
@@ -1666,7 +1993,7 @@ function SettingRow({ label, hint, children }: { label: string; hint?: string; c
   )
 }
 
-function TurnView({ turn, live }: { turn: Turn; live?: boolean }) {
+const TurnView = memo(function TurnView({ turn, live }: { turn: Turn; live?: boolean }) {
   const mine = turn.side === "you"
   return (
     <div className={cn("flex flex-col", mine ? "items-end" : "items-start")}>
@@ -1684,6 +2011,15 @@ function TurnView({ turn, live }: { turn: Turn; live?: boolean }) {
       </div>
     </div>
   )
+})
+
+function ElapsedText({ startedAt }: { startedAt: number | null }) {
+  return <span>{useElapsed(startedAt)}</span>
+}
+
+function LiveLevels({ session }: { session: SessionState }) {
+  const levels = useAudioLevels(session)
+  return <Levels levels={levels} />
 }
 
 function Levels({ levels }: { levels: AudioLevels }) {

@@ -33,7 +33,6 @@ export function MainWindow() {
   const windows = useWindowsState()
   const [settings] = useSettings()
   const KEYS = settings?.shortcuts ?? DEFAULT_SHORTCUTS
-  const elapsed = useElapsed(session.startedAt)
   const dragToolbar = useDragToolbar()
 
   const [error, setError] = useState<string | null>(null)
@@ -172,7 +171,7 @@ export function MainWindow() {
               title={showing("transcript") ? t("Hide the live transcript") : t("Show the live transcript")}
             >
               <Dot className={cn("h-2 w-2", live && "animate-pulse bg-rose-400", paused && "bg-amber-400", connecting && "animate-pulse bg-sky-400")} />
-              <span>{elapsed}</span>
+              <ElapsedText startedAt={session.startedAt} />
               <Captions className="h-4 w-4 opacity-80" />
             </Button>
 
@@ -315,6 +314,10 @@ export function MainWindow() {
       )}
     </div>
   )
+}
+
+function ElapsedText({ startedAt }: { startedAt: number | null }) {
+  return <span>{useElapsed(startedAt)}</span>
 }
 
 function DragHandle() {

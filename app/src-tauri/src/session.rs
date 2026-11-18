@@ -5,7 +5,7 @@ use crate::audio::{AudioLevels, LiveCapture};
 use crate::deepgram::{self, DeepgramConfig, DeepgramHandle, SocketEvent, TranscriptEvent};
 use crate::meetings::{Channel, Meeting, MeetingStatus, MeetingStore, TranscriptSegment};
 use crate::settings::{AudioSource, ProviderKind, SettingsStore};
-use crate::transcript_files::{TranscriptAutosave, format_transcript, now_ms, title_from_transcript};
+use crate::transcript_files::{TranscriptAutosave, format_transcript, format_transcript_tail, now_ms, title_from_transcript};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::future::Future;
@@ -164,9 +164,11 @@ struct Inner {
     capture: Option<Box<dyn Send + Sync>>,
     paused_flag: Arc<AtomicBool>,
     segments: Vec<TranscriptSegment>,
+    transcript_chars: usize,
     pending: HashMap<Option<Channel>, Vec<TranscriptSegment>>,
     last_final: HashMap<Option<Channel>, (String, Option<i64>, f64)>,
     last_utterance: Option<Utterance>,
+    last_them_utterance: Option<Utterance>,
     engine_key: Option<EngineKey>,
     audio_key: Option<AudioKey>,
     reconnects: u32,
@@ -225,9 +227,11 @@ impl SessionManager {
                 capture: None,
                 paused_flag: Arc::new(AtomicBool::new(false)),
                 segments: Vec::new(),
+                transcript_chars: 0,
                 pending: HashMap::new(),
                 last_final: HashMap::new(),
                 last_utterance: None,
+                last_them_utterance: None,
                 engine_key: None,
                 audio_key: None,
                 reconnects: 0,
@@ -265,6 +269,15 @@ impl SessionManager {
         format_transcript(&guard.segments)
     }
 
+    pub fn recent_transcript_text(&self, max_chars: usize) -> String {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        format_transcript_tail(&guard.segments, max_chars)
+    }
+
+    pub fn transcript_char_estimate(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).transcript_chars
+    }
+
     pub fn segments(&self) -> Vec<TranscriptSegment> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).segments.clone()
     }
@@ -279,7 +292,12 @@ impl SessionManager {
     }
 
     pub fn last_utterance(&self) -> Option<Utterance> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).last_utterance.clone()
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if self.settings.get().audio_source != AudioSource::Microphone {
+            guard.last_them_utterance.clone().or_else(|| guard.last_utterance.clone())
+        } else {
+            guard.last_utterance.clone()
+        }
     }
 
     pub fn draft(&self) -> Option<Meeting> {
@@ -321,9 +339,11 @@ impl SessionManager {
             guard.generation += 1;
             let session_gen = guard.generation;
             guard.segments.clear();
+            guard.transcript_chars = 0;
             guard.pending.clear();
             guard.last_final.clear();
             guard.last_utterance = None;
+            guard.last_them_utterance = None;
             guard.reconnects = 0;
             guard.reconnecting = false;
             guard.started_at = Some(now_ms());
@@ -477,8 +497,10 @@ impl SessionManager {
             let flushed = Self::drain_pending_utterances(&mut guard, now_ms());
             let meeting = self.to_meeting(&guard, now_ms());
             guard.segments.clear();
+            guard.transcript_chars = 0;
             guard.last_final.clear();
             guard.last_utterance = None;
+            guard.last_them_utterance = None;
             guard.status = SessionStatus::Idle;
             guard.started_at = None;
             guard.notice = None;
@@ -520,9 +542,11 @@ impl SessionManager {
             guard.reconnecting = false;
             guard.opening = false;
             guard.segments.clear();
+            guard.transcript_chars = 0;
             guard.pending.clear();
             guard.last_final.clear();
             guard.last_utterance = None;
+            guard.last_them_utterance = None;
             guard.started_at = None;
             guard.notice = None;
             guard.engine_key = None;
@@ -879,6 +903,7 @@ impl SessionManager {
                 speaker: event.speaker,
                 channel: event.channel,
             };
+            guard.transcript_chars += segment.text.chars().count() + 10;
             guard.segments.push(segment.clone());
             let pending = guard.pending.entry(event.channel).or_default();
             let first_ts = pending.first().map_or(now, |s| s.timestamp);
@@ -912,6 +937,9 @@ impl SessionManager {
             channel: last.channel,
             timestamp: now,
         };
+        if utterance.channel == Some(Channel::Them) {
+            guard.last_them_utterance = Some(utterance.clone());
+        }
         guard.last_utterance = Some(utterance.clone());
         Some(utterance)
     }
@@ -1218,5 +1246,38 @@ mod tests {
         assert!(session.state().connected);
         let meeting = session.finish().unwrap().unwrap();
         assert_eq!(meeting.full_transcript_text, "Them: Before drop.");
+    }
+
+    #[tokio::test]
+    async fn prefers_interviewer_them_utterance_over_user_filler_in_both_mode() {
+        let (_dir, settings, _meetings, connector, session, _) = harness();
+        session.start().await.unwrap();
+        let tx = connector.sockets.lock().unwrap()[0].1.clone();
+
+        tx.send(SocketEvent::Transcript(TranscriptEvent {
+            text: "How does consistent hashing work?".into(),
+            is_final: true,
+            speech_final: true,
+            confidence: 0.99,
+            speaker: None,
+            channel: Some(Channel::Them),
+        }))
+        .unwrap();
+        tx.send(SocketEvent::Transcript(TranscriptEvent {
+            text: "Good question, let me think.".into(),
+            is_final: true,
+            speech_final: true,
+            confidence: 0.99,
+            speaker: None,
+            channel: Some(Channel::You),
+        }))
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(session.last_utterance().unwrap().text, "How does consistent hashing work?");
+
+        settings.update(SettingsPatch { audio_source: Some(AudioSource::Microphone), ..Default::default() }).unwrap();
+        assert_eq!(session.last_utterance().unwrap().text, "Good question, let me think.");
+        let _ = session.finish();
     }
 }

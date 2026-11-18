@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
+import { loadLocale, registerCatalog, setLocale, t } from "../shared/i18n"
 import { formatDuration, formatWhen, truncate } from "../src/lib/format"
-import { renderMarkdown } from "../src/lib/markdown"
+import { parseMarkdownBlocks, renderMarkdown } from "../src/lib/markdown"
 
 describe("formatDuration", () => {
   it("formats seconds, minutes and hours", () => {
@@ -43,5 +44,46 @@ describe("renderMarkdown", () => {
     expect(html).toContain("<code>code</code>")
     expect(html).toContain("<ul><li>one</li><li>two</li></ul>")
     expect(html).toContain("<pre><code>let a = 1 &lt; 2</code></pre>")
+  })
+
+  it("parses unclosed streaming code fences, unclosed bold leads, headings, links and placeholders", () => {
+    const blocks = parseMarkdownBlocks("**Consistent hashing maps keys", { streaming: true })
+    expect(blocks).toEqual([
+      {
+        kind: "paragraph",
+        isLead: true,
+        lines: [[{ kind: "strong", children: [{ kind: "text", value: "Consistent hashing maps keys" }] }]]
+      }
+    ])
+
+    const withCode = parseMarkdownBlocks(
+      "### Summary\nUse [your service name] and [docs](https://example.com) with 2 * 3 * 4 nodes.\n```python\ndef route(k):\n    return k * 2",
+      { streaming: true }
+    )
+    expect(withCode[0]).toMatchObject({ kind: "heading", level: 3 })
+    expect(withCode[1]).toMatchObject({ kind: "paragraph", isLead: false })
+    if (withCode[1].kind === "paragraph") {
+      expect(withCode[1].lines[0]).toContainEqual({ kind: "placeholder", value: "your service name" })
+      expect(withCode[1].lines[0]).toContainEqual({ kind: "link", label: "docs", href: "https://example.com" })
+      expect(withCode[1].lines[0].some((tok) => tok.kind === "em")).toBe(false)
+    }
+    expect(withCode[2]).toEqual({
+      kind: "code",
+      language: "python",
+      code: "def route(k):\n    return k * 2",
+      closed: false
+    })
+  })
+})
+
+describe("on-demand i18n locale loading", () => {
+  it("loads non-English catalogs dynamically and falls back to English", async () => {
+    await loadLocale("es")
+    expect(t("Start listening")).not.toBe("Start listening")
+    registerCatalog("fr", { "Start listening": "Commencer" })
+    setLocale("fr")
+    expect(t("Start listening")).toBe("Commencer")
+    await loadLocale("en")
+    expect(t("Start listening")).toBe("Start listening")
   })
 })

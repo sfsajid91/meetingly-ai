@@ -137,42 +137,6 @@ body[data-window="main"] #root {
   background: transparent;
 }
 
-/* Rendered assistant text. */
-.md p {
-  margin: 0 0 0.6em;
-}
-.md p:last-child {
-  margin-bottom: 0;
-}
-.md ul,
-.md ol {
-  margin: 0 0 0.6em 1.2em;
-  list-style: disc;
-}
-.md ol {
-  list-style: decimal;
-}
-.md li {
-  margin: 0.2em 0;
-}
-.md code {
-  @apply rounded bg-white/10 px-1.5 py-0.5 font-mono text-[12.5px] text-amber-200;
-}
-.md pre {
-  @apply my-2.5 overflow-x-auto rounded-lg border border-white/10 bg-[#0b0e14] p-3.5 font-mono text-[12.5px] leading-relaxed text-emerald-200;
-}
-.md pre code {
-  background: transparent;
-  padding: 0;
-  color: inherit;
-}
-.md strong {
-  @apply font-semibold text-white;
-}
-.md a {
-  @apply text-sky-300 underline underline-offset-4 hover:text-sky-200;
-}
-
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

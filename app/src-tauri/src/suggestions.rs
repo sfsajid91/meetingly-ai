@@ -254,19 +254,18 @@ impl SuggestionService {
         if !self.settings.get().suggestions {
             return;
         }
-        let transcript = self.session.transcript_text();
-        if transcript.trim().is_empty() {
+        let total_chars = self.session.transcript_char_estimate();
+        if total_chars == 0 {
             return;
         }
-        let (generation, since, messages) = {
-            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if g.updating {
-                g.again = true;
-                return;
-            }
-            let len = transcript.chars().count();
-            if !force {
-                let grown = len.saturating_sub(g.seen_chars);
+        if !force {
+            let wait = {
+                let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if g.updating {
+                    g.again = true;
+                    return;
+                }
+                let grown = total_chars.saturating_sub(g.seen_chars);
                 let min_growth = if g.last_run.is_none() { FIRST_RUN_CHARS } else { GROWTH_CHARS };
                 if grown < min_growth {
                     return;
@@ -274,22 +273,31 @@ impl SuggestionService {
                 let now = Instant::now();
                 let wait_interval = g.last_run.map(|t| (t + MIN_INTERVAL).saturating_duration_since(now)).unwrap_or_default();
                 let wait_backoff = g.failed_at.map(|t| (t + BACKOFF).saturating_duration_since(now)).unwrap_or_default();
-                let wait = wait_interval.max(wait_backoff);
-                if !wait.is_zero() {
-                    drop(g);
-                    self.schedule(wait);
-                    return;
-                }
+                wait_interval.max(wait_backoff)
+            };
+            if !wait.is_zero() {
+                self.schedule(wait);
+                return;
+            }
+        }
+        let window = self.session.recent_transcript_text(TRANSCRIPT_IN_PROMPT);
+        if window.trim().is_empty() {
+            return;
+        }
+        let (generation, messages) = {
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if g.updating {
+                g.again = true;
+                return;
             }
             g.updating = true;
             g.again = false;
             g.last_run = Some(Instant::now());
             let since = g.seen_chars;
-            g.seen_chars = len;
-            let msgs = self.build_prompt_messages(&g, &transcript, since);
-            (g.generation, since, msgs)
+            g.seen_chars = total_chars;
+            let msgs = self.build_prompt_messages(&g, &window, total_chars, since);
+            (g.generation, msgs)
         };
-        let _ = since;
         (self.emit)(self.state());
 
         let outcome = match self.chat.resolve_brain() {
@@ -332,7 +340,7 @@ impl SuggestionService {
         }
     }
 
-    fn build_prompt_messages(&self, g: &Inner, transcript: &str, since: usize) -> Vec<LlmMessage> {
+    fn build_prompt_messages(&self, g: &Inner, window: &str, total_chars: usize, since: usize) -> Vec<LlmMessage> {
         let s = self.settings.get();
         let prompt = s.active_prompt();
         let mut system = vec![SUGGEST_PROMPT.to_string()];
@@ -344,13 +352,16 @@ impl SuggestionService {
             language_instruction(&s.output_language)
         ));
 
-        let chars: Vec<char> = transcript.chars().collect();
-        let offset = chars.len().saturating_sub(TRANSCRIPT_IN_PROMPT);
-        let window: String = chars[offset..].iter().collect();
-        let start = if since < chars.len() { since } else { chars.len().saturating_sub(RECENT_CHARS) };
-        let split_chars = start.saturating_sub(offset).min(window.chars().count());
-        let earlier: String = window.chars().take(split_chars).collect();
-        let fresh: String = window.chars().skip(split_chars).collect();
+        let win_chars = window.chars().count();
+        let fresh_chars = if since > 0 && since < total_chars {
+            (total_chars - since).min(win_chars)
+        } else {
+            RECENT_CHARS.min(win_chars)
+        };
+        let split_chars = win_chars.saturating_sub(fresh_chars);
+        let split_byte = window.char_indices().nth(split_chars).map_or(window.len(), |(idx, _)| idx);
+        let earlier = &window[..split_byte];
+        let fresh = &window[split_byte..];
 
         let answered: Vec<String> = self
             .chat

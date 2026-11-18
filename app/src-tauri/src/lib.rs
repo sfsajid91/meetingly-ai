@@ -65,14 +65,6 @@ struct FitSize {
     height: f64,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DragStep {
-    phase: String,
-    dx: f64,
-    dy: f64,
-}
-
 fn changed(app: &AppHandle, store: &SettingsStore) -> SettingsView {
     let view = store.view();
     let _ = app.emit("settings:changed", &view);
@@ -87,7 +79,6 @@ fn sync_after_settings(app: &AppHandle) {
 
     let s = store.get();
     windows.set_stealth(app, s.stealth);
-    windows.set_suggestions_rail(app, s.suggestions && session.state().status != SessionStatus::Idle);
     shortcuts.register_all(app);
     session.sync_engine();
 
@@ -392,13 +383,6 @@ fn windows_fit(app: AppHandle, window: WebviewWindow, windows: State<'_, Arc<Win
 }
 
 #[tauri::command]
-fn windows_drag(app: AppHandle, windows: State<'_, Arc<WindowManager>>, step: DragStep) {
-    if step.dx.is_finite() && step.dy.is_finite() && step.dx.abs() < 20_000.0 && step.dy.abs() < 20_000.0 {
-        windows.drag_main(&app, &step.phase, step.dx, step.dy);
-    }
-}
-
-#[tauri::command]
 fn transcripts_reveal(session: State<'_, Arc<SessionManager>>, paths: State<'_, AppPaths>) {
     let dir = session.transcript_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -471,15 +455,10 @@ pub fn run() {
 
             let app_handle = app.handle().clone();
             let windows_session = windows.clone();
-            let settings_session = store.clone();
             let session = SessionManager::new(store.clone(), meetings.clone(), transcript_dir.clone(), {
                 let app_handle = app_handle.clone();
                 move |ev| match ev {
                     SessionEvent::State(state) => {
-                        windows_session.set_suggestions_rail(
-                            &app_handle,
-                            settings_session.get().suggestions && state.status != SessionStatus::Idle,
-                        );
                         if state.status != SessionStatus::Idle {
                             windows_session.ensure_chat(&app_handle);
                         } else if let Some(s) = app_handle.try_state::<Arc<SuggestionService>>() {
@@ -643,11 +622,291 @@ pub fn run() {
             panel_toggle,
             panel_set_tab,
             windows_fit,
-            windows_drag,
             transcripts_reveal,
             app_open_data_dir,
             app_quit
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");
+}
+
+#[cfg(test)]
+mod perf_bench {
+    use super::*;
+    use crate::audio::{FirDecimator3, LinearResampler};
+    use crate::meetings::Channel;
+    use crate::transcript_files::{format_transcript, format_transcript_tail, slice_tail_chars};
+    use std::f32::consts::TAU;
+    use std::hint::black_box;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn median_ms(samples: &[f64]) -> f64 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        sorted[sorted.len() / 2]
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_benchmarks() {
+        let mut segments = Vec::with_capacity(1200);
+        for i in 0..1200 {
+            segments.push(TranscriptSegment {
+                text: format!("Turn {i} covers consistent hashing, quorum writes, and tail latency SLAs."),
+                timestamp: i as f64 * 2000.0,
+                confidence: 0.98,
+                speaker: None,
+                channel: Some(if i % 3 == 0 { Channel::Them } else { Channel::You }),
+            });
+        }
+
+        let runs = 7usize;
+        let prompt_iters = 200usize;
+        let mut prompt_before = Vec::with_capacity(runs);
+        let mut prompt_after = Vec::with_capacity(runs);
+        let mut out_a_len = 0usize;
+        let mut out_b_len = 0usize;
+
+        for r in 0..runs {
+            let run_old = || -> (f64, usize) {
+                let mut xor_acc = 0usize;
+                let t0 = Instant::now();
+                for _ in 0..prompt_iters {
+                    let full = format_transcript(black_box(&segments));
+                    let clean = full.trim();
+                    let count = clean.chars().count();
+                    let tail: String = if count > 4000 {
+                        clean.chars().skip(count - 4000).collect()
+                    } else {
+                        clean.to_string()
+                    };
+                    xor_acc ^= black_box(&tail).len();
+                }
+                (t0.elapsed().as_secs_f64() * 1000.0, xor_acc)
+            };
+            let run_new = || -> (f64, usize) {
+                let mut xor_acc = 0usize;
+                let t0 = Instant::now();
+                for _ in 0..prompt_iters {
+                    let tail = format_transcript_tail(black_box(&segments), 4000);
+                    xor_acc ^= black_box(&tail).len();
+                }
+                (t0.elapsed().as_secs_f64() * 1000.0, xor_acc)
+            };
+            if r % 2 == 0 {
+                let (ms_a, a) = run_old();
+                let (ms_b, b) = run_new();
+                prompt_before.push(ms_a);
+                prompt_after.push(ms_b);
+                out_a_len ^= a;
+                out_b_len ^= b;
+            } else {
+                let (ms_b, b) = run_new();
+                let (ms_a, a) = run_old();
+                prompt_after.push(ms_b);
+                prompt_before.push(ms_a);
+                out_b_len ^= b;
+                out_a_len ^= a;
+            }
+        }
+        assert_eq!(
+            format_transcript_tail(&segments, 4000),
+            slice_tail_chars(format_transcript(&segments).trim(), 4000)
+        );
+
+        let blocks: Vec<Vec<f32>> = (0..2812)
+            .map(|b| (0..1024).map(|i| (TAU * 440.0 * (b * 1024 + i) as f32 / 44_100.0).sin() * 0.5).collect())
+            .collect();
+        let mut dsp_before = Vec::with_capacity(runs);
+        let mut dsp_after = Vec::with_capacity(runs);
+        let mut sum_before = 0.0f64;
+        let mut sum_after = 0.0f64;
+
+        for r in 0..runs {
+            let run_alloc = || -> (f64, f64) {
+                let mut resampler = LinearResampler::new(44_100, 48_000);
+                let mut dec = FirDecimator3::new();
+                let mut acc = 0.0f64;
+                let t0 = Instant::now();
+                for block in &blocks {
+                    let up = resampler.push(black_box(block));
+                    let out = dec.push(&up);
+                    for &s in &out {
+                        acc += s as f64;
+                    }
+                }
+                (t0.elapsed().as_secs_f64() * 1000.0, acc)
+            };
+            let run_scratch = || -> (f64, f64) {
+                let mut resampler = LinearResampler::new(44_100, 48_000);
+                let mut dec = FirDecimator3::new();
+                let mut buf48 = Vec::with_capacity(2048);
+                let mut buf16 = Vec::with_capacity(1024);
+                let mut acc = 0.0f64;
+                let t0 = Instant::now();
+                for block in &blocks {
+                    resampler.push_into(black_box(block), &mut buf48);
+                    dec.push_into(&buf48, &mut buf16);
+                    for &s in &buf16 {
+                        acc += s as f64;
+                    }
+                }
+                (t0.elapsed().as_secs_f64() * 1000.0, acc)
+            };
+            if r % 2 == 0 {
+                let (ms_a, a) = run_alloc();
+                let (ms_b, b) = run_scratch();
+                dsp_before.push(ms_a);
+                dsp_after.push(ms_b);
+                sum_before = a;
+                sum_after = b;
+            } else {
+                let (ms_b, b) = run_scratch();
+                let (ms_a, a) = run_alloc();
+                dsp_after.push(ms_b);
+                dsp_before.push(ms_a);
+                sum_after = b;
+                sum_before = a;
+            }
+        }
+        assert!((sum_before - sum_after).abs() < 1e-4, "DSP checksum mismatch: {sum_before} vs {sum_after}");
+
+        async fn bench_uncached(req_count: &AtomicUsize, base: &str, msg: &[crate::llm::LlmMessage]) -> (f64, usize) {
+            let before = req_count.load(Ordering::SeqCst);
+            let t0 = Instant::now();
+            for _ in 0..5 {
+                let client = LlmClient::new();
+                let res = client.chat_stream(base, None, "compat-model", msg, |_| {}).await.unwrap();
+                assert_eq!(res.text, "Consistent hashing works.");
+            }
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            (ms, req_count.load(Ordering::SeqCst) - before)
+        }
+
+        async fn bench_cached(req_count: &AtomicUsize, base: &str, msg: &[crate::llm::LlmMessage]) -> (f64, usize) {
+            let before = req_count.load(Ordering::SeqCst);
+            let client = LlmClient::new();
+            let t0 = Instant::now();
+            for _ in 0..5 {
+                let res = client.chat_stream(base, None, "compat-model", msg, |_| {}).await.unwrap();
+                assert_eq!(res.text, "Consistent hashing works.");
+            }
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            (ms, req_count.load(Ordering::SeqCst) - before)
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (llm_before, llm_after, reqs_before, reqs_after) = rt.block_on(async {
+            let req_count = Arc::new(AtomicUsize::new(0));
+            let req_srv = req_count.clone();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = listener.accept().await {
+                    let req_srv = req_srv.clone();
+                    tokio::spawn(async move {
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 4096];
+                        let header_end;
+                        loop {
+                            let n = sock.read(&mut tmp).await.unwrap_or(0);
+                            if n == 0 {
+                                return;
+                            }
+                            buf.extend_from_slice(&tmp[..n]);
+                            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                header_end = pos + 4;
+                                break;
+                            }
+                        }
+                        let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                        let content_len = headers
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok()).flatten()
+                            })
+                            .unwrap_or(0);
+                        while buf.len() < header_end + content_len {
+                            let n = sock.read(&mut tmp).await.unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            buf.extend_from_slice(&tmp[..n]);
+                        }
+                        req_srv.fetch_add(1, Ordering::SeqCst);
+                        let body = String::from_utf8_lossy(&buf[header_end..header_end + content_len]).to_string();
+                        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+                        if parsed.get("stream_options").is_some() {
+                            let msg = br#"{"error":{"message":"unknown parameter stream_options"}}"#;
+                            let head = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                msg.len()
+                            );
+                            let _ = sock.write_all(head.as_bytes()).await;
+                            let _ = sock.write_all(msg).await;
+                        } else {
+                            let sse = b"data: {\"choices\":[{\"delta\":{\"content\":\"Consistent hashing works.\"}}]}\n\ndata: [DONE]\n\n";
+                            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                            let _ = sock.write_all(head.as_bytes()).await;
+                            let _ = sock.write_all(sse).await;
+                        }
+                        let _ = sock.flush().await;
+                    });
+                }
+            });
+            let base = format!("http://{addr}/v1");
+            let msg = vec![crate::llm::LlmMessage::user("Explain consistent hashing")];
+
+            let mut llm_before = Vec::with_capacity(runs);
+            let mut llm_after = Vec::with_capacity(runs);
+            let mut reqs_before = 0usize;
+            let mut reqs_after = 0usize;
+
+            for r in 0..runs {
+                if r % 2 == 0 {
+                    let (ms_b, rb) = bench_uncached(&req_count, &base, &msg).await;
+                    let (ms_a, ra) = bench_cached(&req_count, &base, &msg).await;
+                    llm_before.push(ms_b);
+                    llm_after.push(ms_a);
+                    reqs_before = rb;
+                    reqs_after = ra;
+                } else {
+                    let (ms_a, ra) = bench_cached(&req_count, &base, &msg).await;
+                    let (ms_b, rb) = bench_uncached(&req_count, &base, &msg).await;
+                    llm_after.push(ms_a);
+                    llm_before.push(ms_b);
+                    reqs_after = ra;
+                    reqs_before = rb;
+                }
+            }
+            (llm_before, llm_after, reqs_before, reqs_after)
+        });
+
+        let summary = serde_json::json!({
+            "prompt_1200_segments_200x": {
+                "runs": runs,
+                "before_ms": { "median": median_ms(&prompt_before), "min": prompt_before.iter().copied().fold(f64::INFINITY, f64::min), "max": prompt_before.iter().copied().fold(0.0_f64, f64::max), "samples": prompt_before },
+                "after_ms": { "median": median_ms(&prompt_after), "min": prompt_after.iter().copied().fold(f64::INFINITY, f64::min), "max": prompt_after.iter().copied().fold(0.0_f64, f64::max), "samples": prompt_after },
+                "checksum_match": out_a_len == out_b_len
+            },
+            "audio_dsp_60s_2812_blocks": {
+                "runs": runs,
+                "before_ms": { "median": median_ms(&dsp_before), "min": dsp_before.iter().copied().fold(f64::INFINITY, f64::min), "max": dsp_before.iter().copied().fold(0.0_f64, f64::max), "samples": dsp_before },
+                "after_ms": { "median": median_ms(&dsp_after), "min": dsp_after.iter().copied().fold(f64::INFINITY, f64::min), "max": dsp_after.iter().copied().fold(0.0_f64, f64::max), "samples": dsp_after },
+                "checksum_delta": (sum_before - sum_after).abs()
+            },
+            "llm_stream_5_questions_no_stream_options": {
+                "runs": runs,
+                "before_ms": { "median": median_ms(&llm_before), "min": llm_before.iter().copied().fold(f64::INFINITY, f64::min), "max": llm_before.iter().copied().fold(0.0_f64, f64::max), "samples": llm_before },
+                "after_ms": { "median": median_ms(&llm_after), "min": llm_after.iter().copied().fold(f64::INFINITY, f64::min), "max": llm_after.iter().copied().fold(0.0_f64, f64::max), "samples": llm_after },
+                "http_requests_per_5_questions_before": reqs_before,
+                "http_requests_per_5_questions_after": reqs_after
+            }
+        });
+        println!("PERF_BENCH_JSON={}", serde_json::to_string(&summary).unwrap());
+    }
 }

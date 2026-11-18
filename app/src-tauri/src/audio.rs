@@ -208,6 +208,9 @@ fn live_capture_loop(
     let mut sys_decimator = FirDecimator3::new();
     let mut mic_16k = VecDeque::<f32>::with_capacity(CHUNK_FRAMES_16K * 4);
     let mut sys_16k = VecDeque::<f32>::with_capacity(CHUNK_FRAMES_16K * 4);
+    let mut scratch_48k = Vec::<f32>::with_capacity(BLOCK_SAMPLES * 2);
+    let mut scratch_clean = Vec::<f32>::with_capacity(BLOCK_SAMPLES * 2);
+    let mut scratch_16k = Vec::<f32>::with_capacity(BLOCK_SAMPLES);
     let mut mic_rms_acc = RmsAccumulator::default();
     let mut sys_rms_acc = RmsAccumulator::default();
     let mut last_levels = Instant::now();
@@ -239,22 +242,34 @@ fn live_capture_loop(
                     if is_paused {
                         continue;
                     }
-                    let at_48k = mic_resampler.push(&buf[..len]);
-                    let clean = match mic_denoiser.as_mut() {
-                        Some(denoiser) => denoiser.process(&at_48k),
-                        None => at_48k,
-                    };
-                    let at_16k = mic_decimator.push(&clean);
-                    mic_rms_acc.push(&at_16k);
-                    mic_16k.extend(at_16k);
+                    let raw = &buf[..len];
+                    if mic_rate == TARGET_RATE && mic_denoiser.is_none() {
+                        mic_decimator.push_into(raw, &mut scratch_16k);
+                    } else {
+                        let at_48k: &[f32] = if mic_rate == TARGET_RATE {
+                            raw
+                        } else {
+                            mic_resampler.push_into(raw, &mut scratch_48k);
+                            &scratch_48k
+                        };
+                        let clean: &[f32] = if let Some(denoiser) = mic_denoiser.as_mut() {
+                            denoiser.process_into(at_48k, &mut scratch_clean);
+                            &scratch_clean
+                        } else {
+                            at_48k
+                        };
+                        mic_decimator.push_into(clean, &mut scratch_16k);
+                    }
+                    mic_rms_acc.push(&scratch_16k);
+                    mic_16k.extend(scratch_16k.iter().copied());
                 }
                 Ok(CaptureMessage::SystemBlock(buf, len)) => {
                     if is_paused {
                         continue;
                     }
-                    let at_16k = sys_decimator.push(&buf[..len]);
-                    sys_rms_acc.push(&at_16k);
-                    sys_16k.extend(at_16k);
+                    sys_decimator.push_into(&buf[..len], &mut scratch_16k);
+                    sys_rms_acc.push(&scratch_16k);
+                    sys_16k.extend(scratch_16k.iter().copied());
                 }
                 Ok(CaptureMessage::Fault(err)) => {
                     report_error(err);
@@ -374,49 +389,64 @@ pub struct LinearResampler {
     to: u32,
     pos: f64,
     carry: Option<f32>,
+    scratch: Vec<f32>,
 }
 
 impl LinearResampler {
     pub fn new(from: u32, to: u32) -> Self {
-        Self { from, to, pos: 0.0, carry: None }
+        Self {
+            from,
+            to,
+            pos: 0.0,
+            carry: None,
+            scratch: Vec::with_capacity(BLOCK_SAMPLES + 1),
+        }
     }
 
+    #[cfg(test)]
     pub fn push(&mut self, input: &[f32]) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.push_into(input, &mut out);
+        out
+    }
+
+    pub fn push_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        out.clear();
         if input.is_empty() {
-            return Vec::new();
+            return;
         }
         if self.from == self.to {
-            return input.to_vec();
+            out.extend_from_slice(input);
+            return;
         }
         let step = self.from as f64 / self.to as f64;
-        let mut combined = Vec::with_capacity(input.len() + 1);
+        self.scratch.clear();
         let offset = if let Some(prev) = self.carry {
-            combined.push(prev);
+            self.scratch.push(prev);
             1.0
         } else {
             0.0
         };
-        combined.extend_from_slice(input);
-        let limit = (combined.len() - 1) as f64;
+        self.scratch.extend_from_slice(input);
+        let limit = (self.scratch.len() - 1) as f64;
         let mut pos = self.pos + offset;
-        let mut out = Vec::with_capacity(((input.len() as f64 / step).ceil() as usize) + 1);
         while pos < limit {
             let idx = pos as usize;
             let frac = (pos - idx as f64) as f32;
-            let a = combined[idx];
-            let b = combined[idx + 1];
+            let a = self.scratch[idx];
+            let b = self.scratch[idx + 1];
             out.push(a + (b - a) * frac);
             pos += step;
         }
         self.pos = pos - limit;
         self.carry = input.last().copied();
-        out
     }
 }
 
 pub struct FirDecimator3 {
     history: [f32; FIR_TAPS - 1],
     phase: usize,
+    scratch: Vec<f32>,
 }
 
 impl Default for FirDecimator3 {
@@ -427,30 +457,40 @@ impl Default for FirDecimator3 {
 
 impl FirDecimator3 {
     pub fn new() -> Self {
-        Self { history: [0.0; FIR_TAPS - 1], phase: 0 }
+        Self {
+            history: [0.0; FIR_TAPS - 1],
+            phase: 0,
+            scratch: Vec::with_capacity((FIR_TAPS - 1) + BLOCK_SAMPLES * 2),
+        }
     }
 
+    #[cfg(test)]
     pub fn push(&mut self, input: &[f32]) -> Vec<f32> {
-        if input.is_empty() {
-            return Vec::new();
-        }
-        let mut work = Vec::with_capacity(self.history.len() + input.len());
-        work.extend_from_slice(&self.history);
-        work.extend_from_slice(input);
+        let mut out = Vec::new();
+        self.push_into(input, &mut out);
+        out
+    }
 
-        let mut out = Vec::with_capacity(input.len() / 3 + 1);
+    pub fn push_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        out.clear();
+        if input.is_empty() {
+            return;
+        }
+        self.scratch.clear();
+        self.scratch.extend_from_slice(&self.history);
+        self.scratch.extend_from_slice(input);
+
         let start = self.phase;
         let mut idx = start;
         while idx < input.len() {
-            let window = &work[idx..idx + FIR_TAPS];
+            let window = &self.scratch[idx..idx + FIR_TAPS];
             let acc: f32 = window.iter().zip(FIR_COEFFICIENTS.iter()).map(|(s, c)| s * c).sum();
             out.push(acc);
             idx += 3;
         }
         self.phase = idx - input.len();
-        let tail_start = work.len() - (FIR_TAPS - 1);
-        self.history.copy_from_slice(&work[tail_start..]);
-        out
+        let tail_start = self.scratch.len() - (FIR_TAPS - 1);
+        self.history.copy_from_slice(&self.scratch[tail_start..]);
     }
 }
 
@@ -469,14 +509,15 @@ impl MicDenoiser {
         }
     }
 
-    fn process(&mut self, input: &[f32]) -> Vec<f32> {
+    fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
         const N: usize = nnnoiseless::FRAME_SIZE;
+        out.clear();
         self.pending.extend_from_slice(input);
-        let mut out = Vec::with_capacity(self.pending.len());
         let mut in_frame = [0.0f32; N];
         let mut out_frame = [0.0f32; N];
-        while self.pending.len() >= N {
-            for (dst, src) in in_frame.iter_mut().zip(self.pending.drain(..N)) {
+        let mut offset = 0usize;
+        while self.pending.len() - offset >= N {
+            for (dst, &src) in in_frame.iter_mut().zip(&self.pending[offset..offset + N]) {
                 *dst = src * 32768.0;
             }
             self.state.process_frame(&mut out_frame, &in_frame);
@@ -486,8 +527,11 @@ impl MicDenoiser {
             } else {
                 out.extend(out_frame.iter().map(|s| s / 32768.0));
             }
+            offset += N;
         }
-        out
+        if offset > 0 {
+            self.pending.drain(..offset);
+        }
     }
 }
 
@@ -722,6 +766,26 @@ mod tests {
         let b = r.push(&chunk);
         let total = a.len() + b.len();
         assert!((9595..=9605).contains(&total), "unexpected resampled len: {total}");
+    }
+
+    #[test]
+    fn scratch_dsp_push_into_matches_allocating_push() {
+        let mut r_alloc = LinearResampler::new(44_100, 48_000);
+        let mut r_scratch = LinearResampler::new(44_100, 48_000);
+        let mut d_alloc = FirDecimator3::new();
+        let mut d_scratch = FirDecimator3::new();
+        let mut buf_48 = Vec::with_capacity(2048);
+        let mut buf_16 = Vec::with_capacity(1024);
+
+        for block_idx in 0..8 {
+            let chunk: Vec<f32> = (0..1024)
+                .map(|i| (TAU * 700.0 * (block_idx * 1024 + i) as f32 / 44_100.0).sin())
+                .collect();
+            let expected = d_alloc.push(&r_alloc.push(&chunk));
+            r_scratch.push_into(&chunk, &mut buf_48);
+            d_scratch.push_into(&buf_48, &mut buf_16);
+            assert_eq!(buf_16, expected);
+        }
     }
 }
 

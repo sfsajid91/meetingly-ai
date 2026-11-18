@@ -54,6 +54,8 @@ pub struct ChatMessage {
 pub struct ChatChunk {
     pub id: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ChatKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -101,6 +103,24 @@ pub trait BrainBackend: Send + Sync {
     fn chat_once(&self, config: BrainConfig, messages: Vec<LlmMessage>) -> StreamFuture;
 
     fn vision(&self, config: BrainConfig, base64_jpeg: String, prompt: String, system: Option<String>) -> StreamFuture;
+
+    fn vision_stream(
+        &self,
+        config: BrainConfig,
+        base64_jpeg: String,
+        prompt: String,
+        system: Option<String>,
+        mut on_delta: Box<dyn FnMut(&str) + Send>,
+    ) -> StreamFuture {
+        let fut = self.vision(config, base64_jpeg, prompt, system);
+        Box::pin(async move {
+            let res = fut.await?;
+            if !res.text.is_empty() {
+                on_delta(&res.text);
+            }
+            Ok(res)
+        })
+    }
 }
 
 impl BrainBackend for LlmClient {
@@ -140,6 +160,31 @@ impl BrainBackend for LlmClient {
                     &base64_jpeg,
                     &prompt,
                     system.as_deref(),
+                )
+                .await
+                .map_err(|e| format!("{}: {e}", config.label))
+        })
+    }
+
+    fn vision_stream(
+        &self,
+        config: BrainConfig,
+        base64_jpeg: String,
+        prompt: String,
+        system: Option<String>,
+        mut on_delta: Box<dyn FnMut(&str) + Send>,
+    ) -> StreamFuture {
+        let client = self.clone();
+        Box::pin(async move {
+            client
+                .vision_stream(
+                    &config.endpoint,
+                    config.api_key.as_deref(),
+                    &config.model,
+                    &base64_jpeg,
+                    &prompt,
+                    system.as_deref(),
+                    move |d| on_delta(d),
                 )
                 .await
                 .map_err(|e| format!("{}: {e}", config.label))
@@ -377,7 +422,21 @@ impl ChatService {
                     Ok(brain) => {
                         let sys = self.system_prompt();
                         let ask = prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).unwrap_or_else(|| SCREENSHOT_PROMPT.into());
-                        let call = self.backend.vision(brain, shot.base64, ask, Some(sys));
+                        let emit = self.emit.clone();
+                        let chunk_id = shot_id.clone();
+                        let call = self.backend.vision_stream(
+                            brain,
+                            shot.base64,
+                            ask,
+                            Some(sys),
+                            Box::new(move |delta| {
+                                (emit)(ChatEvent::Chunk(ChatChunk {
+                                    id: chunk_id.clone(),
+                                    text: delta.to_string(),
+                                    kind: Some(ChatKind::Screenshot),
+                                }));
+                            }),
+                        );
                         let handle = tokio::spawn(call);
                         let abort = handle.abort_handle();
                         {
@@ -391,7 +450,7 @@ impl ChatService {
                         match handle.await {
                             Ok(Ok(res)) => {
                                 let display = if res.text.trim().is_empty() { "(no description)".into() } else { res.text.clone() };
-                                self.push_message(None, ChatRole::Assistant, ChatKind::Screenshot, display);
+                                self.push_message(Some(shot_id.clone()), ChatRole::Assistant, ChatKind::Screenshot, display);
                                 Ok(ScreenshotResult {
                                     text: res.text,
                                     tokens: res.tokens,
@@ -536,7 +595,7 @@ impl ChatService {
             } else {
                 &guard.history[..]
             };
-            let mut msgs = build_messages(&self.system_prompt(), history_slice, &self.session.transcript_text());
+            let mut msgs = build_messages(&self.system_prompt(), history_slice, &self.session.recent_transcript_text(TRANSCRIPT_IN_PROMPT));
             msgs.push(LlmMessage::user(user_content));
             msgs
         };
@@ -625,7 +684,11 @@ impl ChatService {
                                     st2.0 = StreamGateState::Answer;
                                     st2.1 = true;
                                     drop(st2);
-                                    (on_delta_emit)(ChatEvent::Chunk(ChatChunk { id: on_delta_id.clone(), text: head }));
+                                    (on_delta_emit)(ChatEvent::Chunk(ChatChunk {
+                                        id: on_delta_id.clone(),
+                                        text: head,
+                                        kind: None,
+                                    }));
                                 } else {
                                     on_delta_state.lock().unwrap().0 = StreamGateState::Skip;
                                 }
@@ -637,6 +700,7 @@ impl ChatService {
                         (on_delta_emit)(ChatEvent::Chunk(ChatChunk {
                             id: on_delta_id.clone(),
                             text: delta.to_string(),
+                            kind: None,
                         }));
                     }
                 }
@@ -757,12 +821,7 @@ pub fn build_messages(system: &str, history: &[ChatMessage], transcript: &str) -
     let mut out = vec![LlmMessage::system(system)];
     let clean_transcript = transcript.trim();
     if !clean_transcript.is_empty() {
-        let tail: String = if clean_transcript.chars().count() > TRANSCRIPT_IN_PROMPT {
-            let skip = clean_transcript.chars().count() - TRANSCRIPT_IN_PROMPT;
-            clean_transcript.chars().skip(skip).collect()
-        } else {
-            clean_transcript.to_string()
-        };
+        let tail = crate::transcript_files::slice_tail_chars(clean_transcript, TRANSCRIPT_IN_PROMPT);
         out.push(LlmMessage::system(format!("Live meeting transcript (most recent):\n{tail}")));
     }
     let filtered: Vec<&ChatMessage> = history.iter().filter(|m| m.kind != ChatKind::Error).collect();
@@ -1015,5 +1074,16 @@ mod tests {
         task.await.unwrap().unwrap();
         assert!(!chat.is_busy());
         assert!(events.lock().unwrap().iter().any(|e| matches!(e, ChatEvent::Busy(false))));
+    }
+
+    #[tokio::test]
+    async fn streams_screenshot_chunks_before_final_message() {
+        let backend = MockBackend::new(|_, _| unreachable!());
+        let (_dir, _settings, chat, events) = setup_chat(backend);
+        let res = chat.screenshot(None).await.unwrap();
+        assert_eq!(res.text, "A code editor.");
+        let evs = events.lock().unwrap();
+        assert!(evs.iter().any(|e| matches!(e, ChatEvent::Chunk(c) if c.kind == Some(ChatKind::Screenshot) && c.text == "A code editor.")));
+        assert!(evs.iter().any(|e| matches!(e, ChatEvent::Message(m) if m.kind == ChatKind::Screenshot && m.text == "A code editor.")));
     }
 }

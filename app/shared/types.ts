@@ -279,6 +279,7 @@ export interface ChatMessage {
 export interface ChatChunk {
   id: string
   text: string
+  kind?: ChatKind
 }
 
 export interface Suggestion {

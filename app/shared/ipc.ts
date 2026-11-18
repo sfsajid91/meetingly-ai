@@ -52,7 +52,6 @@ export interface InvokeMap {
   "panel:toggle": (tab: PanelTab) => void
   "panel:set-tab": (tab: PanelTab) => void
   "windows:fit": (size: { width: number; height: number }) => void
-  "windows:drag": (step: { phase: "start" | "move" | "end"; dx: number; dy: number }) => void
   "transcripts:reveal": () => void
   "app:open-data-dir": () => void
   "app:quit": () => void

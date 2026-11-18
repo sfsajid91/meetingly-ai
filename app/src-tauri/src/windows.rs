@@ -30,18 +30,11 @@ pub struct WindowsState {
     pub panel_tab: PanelTab,
 }
 
-struct DragOrigin {
-    x: i32,
-    y: i32,
-}
-
 struct Inner {
     stealth: bool,
     quitting: bool,
     panel_tab: PanelTab,
-    panel_extra: f64,
     restore_set: Option<Vec<WindowKind>>,
-    drag_origin: Option<DragOrigin>,
 }
 
 pub struct WindowManager {
@@ -55,9 +48,7 @@ impl WindowManager {
                 stealth,
                 quitting: false,
                 panel_tab: PanelTab::Answers,
-                panel_extra: 0.0,
                 restore_set: None,
-                drag_origin: None,
             }),
         }
     }
@@ -107,15 +98,12 @@ impl WindowManager {
         if let Some(win) = app.get_webview_window("chat") {
             return Some(win);
         }
-        let (stealth, extra) = {
-            let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            (g.stealth, g.panel_extra)
-        };
+        let stealth = self.inner.lock().unwrap_or_else(|e| e.into_inner()).stealth;
         let win = WebviewWindowBuilder::new(app, "chat", WebviewUrl::App("index.html#/chat".into()))
             .title("Meetingly")
-            .inner_size(920.0 + extra, 640.0)
-            .min_inner_size(640.0 + extra, 440.0)
-            .max_inner_size(1440.0 + extra, 1000.0)
+            .inner_size(920.0, 640.0)
+            .min_inner_size(640.0, 440.0)
+            .max_inner_size(1440.0, 1000.0)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -224,10 +212,6 @@ impl WindowManager {
         self.emit_state(app);
     }
 
-    pub fn set_suggestions_rail(&self, _app: &AppHandle, _visible: bool) {
-        // Suggestions now render inline inside the spacious workspace pane; no window resize needed.
-    }
-
     pub fn hide_all(&self, app: &AppHandle) {
         let mut to_restore = Vec::new();
         for (kind, label) in [(WindowKind::Main, "main"), (WindowKind::Chat, "chat")] {
@@ -307,36 +291,11 @@ impl WindowManager {
         let (w, h) = if label == "main" {
             (width.clamp(260.0, 960.0), height.clamp(40.0, 150.0))
         } else {
-            let extra = self.inner.lock().unwrap_or_else(|e| e.into_inner()).panel_extra;
-            (width.clamp(640.0 + extra, 1440.0 + extra), height.clamp(440.0, 1000.0))
+            (width.clamp(640.0, 1440.0), height.clamp(440.0, 1000.0))
         };
         let _ = win.set_size(LogicalSize::new(w, h));
         if label == "main" {
             self.layout_chat(app);
-        }
-    }
-
-    pub fn drag_main(&self, app: &AppHandle, phase: &str, dx: f64, dy: f64) {
-        let Some(main) = app.get_webview_window("main") else { return };
-        let scale = main.scale_factor().unwrap_or(1.0);
-        match phase {
-            "start" => {
-                if let Ok(pos) = main.outer_position() {
-                    self.inner.lock().unwrap_or_else(|e| e.into_inner()).drag_origin = Some(DragOrigin { x: pos.x, y: pos.y });
-                }
-            }
-            "move" => {
-                let origin = self.inner.lock().unwrap_or_else(|e| e.into_inner()).drag_origin.as_ref().map(|o| (o.x, o.y));
-                if let Some((ox, oy)) = origin {
-                    let nx = ox + (dx * scale).round() as i32;
-                    let ny = oy + (dy * scale).round() as i32;
-                    let _ = main.set_position(PhysicalPosition::new(nx, ny));
-                    self.layout_chat(app);
-                }
-            }
-            _ => {
-                self.inner.lock().unwrap_or_else(|e| e.into_inner()).drag_origin = None;
-            }
         }
     }
 

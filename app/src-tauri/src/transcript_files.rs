@@ -20,6 +20,10 @@ pub fn segment_label(segment: &TranscriptSegment) -> String {
 
 pub fn format_transcript(segments: &[TranscriptSegment]) -> String {
     let labelled = segments.iter().any(|s| s.channel.is_some() || s.speaker.is_some());
+    format_transcript_with_mode(segments, labelled)
+}
+
+fn format_transcript_with_mode(segments: &[TranscriptSegment], labelled: bool) -> String {
     if !labelled {
         return segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
     }
@@ -41,6 +45,54 @@ pub fn format_transcript(segments: &[TranscriptSegment]) -> String {
         }
     }
     lines.join("\n")
+}
+
+pub fn slice_tail_chars(s: &str, max_chars: usize) -> &str {
+    if max_chars == 0 {
+        return "";
+    }
+    let mut count = 0usize;
+    for (idx, _) in s.char_indices().rev() {
+        count += 1;
+        if count == max_chars {
+            return &s[idx..];
+        }
+    }
+    s
+}
+
+pub fn format_transcript_tail(segments: &[TranscriptSegment], max_chars: usize) -> String {
+    if segments.is_empty() || max_chars == 0 {
+        return String::new();
+    }
+    let labelled = segments.iter().any(|s| s.channel.is_some() || s.speaker.is_some());
+    let mut budget = 0usize;
+    let mut start = segments.len();
+    let mut prev_label: Option<String> = None;
+    while start > 0 {
+        start -= 1;
+        let seg = &segments[start];
+        budget += seg.text.chars().count() + 1;
+        if labelled {
+            let lbl = segment_label(seg);
+            let lbl_str = if lbl.is_empty() { "Unknown" } else { lbl.as_str() };
+            if prev_label.as_deref() != Some(lbl_str) {
+                budget += lbl_str.chars().count() + 2;
+                prev_label = Some(lbl_str.to_string());
+            }
+        }
+        if budget >= max_chars {
+            break;
+        }
+    }
+    if labelled {
+        let boundary = segment_label(&segments[start]);
+        while start > 0 && segment_label(&segments[start - 1]) == boundary {
+            start -= 1;
+        }
+    }
+    let formatted = format_transcript_with_mode(&segments[start..], labelled);
+    slice_tail_chars(&formatted, max_chars).to_string()
 }
 
 pub fn title_from_transcript(text: &str) -> String {
@@ -361,5 +413,24 @@ mod tests {
         assert!(second.to_string_lossy().contains("(2).txt"));
         let kept = write_transcript_file(dir.path(), &sample_meeting("Sync"), Some(&second)).unwrap();
         assert_eq!(kept, second);
+    }
+
+    #[test]
+    fn formats_transcript_tail_identically_to_full_suffix() {
+        let mut segments = Vec::new();
+        for i in 0..400 {
+            segments.push(TranscriptSegment {
+                text: format!("Segment {i} discussing distributed cache invalidation and latency budgets."),
+                timestamp: i as f64 * 1000.0,
+                confidence: 0.99,
+                speaker: None,
+                channel: Some(if i % 3 == 0 { Channel::Them } else { Channel::You }),
+            });
+        }
+        let full = format_transcript(&segments);
+        let expected = slice_tail_chars(&full, 4000);
+        let actual = format_transcript_tail(&segments, 4000);
+        assert_eq!(actual, expected);
+        assert!(actual.chars().count() <= 4000);
     }
 }

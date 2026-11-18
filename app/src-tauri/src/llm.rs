@@ -5,6 +5,8 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use url::Url;
 
@@ -120,6 +122,7 @@ pub fn describe_error(status: Option<u16>, raw: &str, endpoint: &str, model: &st
 #[derive(Clone)]
 pub struct LlmClient {
     http: Client,
+    no_stream_options: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Default for LlmClient {
@@ -135,7 +138,10 @@ impl LlmClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("reqwest client builds");
-        Self { http }
+        Self {
+            http,
+            no_stream_options: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     pub async fn list_models(&self, endpoint: &str, api_key: Option<&str>) -> Result<Vec<String>, String> {
@@ -215,12 +221,17 @@ impl LlmClient {
         while let Some(next) = stream.next().await {
             let chunk = next.map_err(|e| describe_error(None, &e.to_string(), &base, model))?;
             buffer.extend_from_slice(&chunk);
-            while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
-                let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
-                let line = String::from_utf8_lossy(&line_bytes);
+            let mut cursor = 0usize;
+            while let Some(rel) = buffer[cursor..].iter().position(|&b| b == b'\n') {
+                let end = cursor + rel;
+                let line = String::from_utf8_lossy(&buffer[cursor..=end]);
+                cursor = end + 1;
                 if process_sse_line(&line, &mut full, &mut tokens, &mut on_delta)? {
                     return Ok(LlmResult { text: full, tokens });
                 }
+            }
+            if cursor > 0 {
+                buffer.drain(..cursor);
             }
         }
         if !buffer.is_empty() {
@@ -247,6 +258,27 @@ impl LlmClient {
         self.chat_once(endpoint, api_key, model, &messages, None).await
     }
 
+    pub async fn vision_stream<F>(
+        &self,
+        endpoint: &str,
+        api_key: Option<&str>,
+        model: &str,
+        base64_jpeg: &str,
+        prompt: &str,
+        system: Option<&str>,
+        on_delta: F,
+    ) -> Result<LlmResult, String>
+    where
+        F: FnMut(&str) + Send,
+    {
+        let mut messages = Vec::new();
+        if let Some(sys) = system.filter(|s| !s.trim().is_empty()) {
+            messages.push(LlmMessage::system(sys));
+        }
+        messages.push(LlmMessage::user_image(prompt, base64_jpeg));
+        self.chat_stream(endpoint, api_key, model, &messages, on_delta).await
+    }
+
     pub async fn test_provider(&self, endpoint: &str, api_key: Option<&str>, model: &str) -> ProviderTestResult {
         let base = normalize_base_url(endpoint);
         let res = match self
@@ -271,24 +303,37 @@ impl LlmClient {
         let mut tokens = 0u64;
         let mut err_msg = None;
         let mut saw_sse_data = false;
+        let mut finished = false;
         'sse: while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     buf.extend_from_slice(&bytes);
-                    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                        let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                        let line = String::from_utf8_lossy(&line_bytes);
+                    let mut cursor = 0usize;
+                    while let Some(rel) = buf[cursor..].iter().position(|&b| b == b'\n') {
+                        let end = cursor + rel;
+                        let line = String::from_utf8_lossy(&buf[cursor..=end]);
+                        cursor = end + 1;
                         if line.trim_start().starts_with("data:") {
                             saw_sse_data = true;
                         }
                         match process_sse_line(&line, &mut full, &mut tokens, &mut |_| {}) {
-                            Ok(true) => break 'sse,
+                            Ok(true) => {
+                                finished = true;
+                                break;
+                            }
                             Ok(false) => {}
                             Err(e) => {
                                 err_msg = Some(e);
-                                break 'sse;
+                                finished = true;
+                                break;
                             }
                         }
+                    }
+                    if cursor > 0 {
+                        buf.drain(..cursor);
+                    }
+                    if finished {
+                        break 'sse;
                     }
                 }
                 Err(e) => {
@@ -297,7 +342,7 @@ impl LlmClient {
                 }
             }
         }
-        if err_msg.is_none() && !buf.is_empty() {
+        if !finished && err_msg.is_none() && !buf.is_empty() {
             let line = String::from_utf8_lossy(&buf);
             if line.trim_start().starts_with("data:") {
                 saw_sse_data = true;
@@ -348,7 +393,12 @@ impl LlmClient {
         max_tokens: Option<u32>,
         timeout: Duration,
     ) -> Result<reqwest::Response, String> {
-        let mut include_stream_options = true;
+        let cache_key = format!("{base}|{model}");
+        let mut include_stream_options = !self
+            .no_stream_options
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&cache_key);
         loop {
             let body = build_chat_body(model, messages, true, max_tokens, include_stream_options);
             let res = self
@@ -361,6 +411,10 @@ impl LlmClient {
             }
             let raw = res.text().await.unwrap_or_default();
             if include_stream_options && status == 400 && raw.to_lowercase().contains("stream_options") {
+                self.no_stream_options
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(cache_key.clone());
                 include_stream_options = false;
                 continue;
             }
@@ -624,6 +678,13 @@ mod tests {
             .unwrap();
         assert_eq!(res.text, "ok");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let res_cached = client
+            .chat_stream(&base, None, "no-stream-opts", &[LlmMessage::user("hi again")], |_| {})
+            .await
+            .unwrap();
+        assert_eq!(res_cached.text, "ok");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
 
         let empty = client.test_provider(&base, None, "empty-sse").await;
         assert!(!empty.ok);

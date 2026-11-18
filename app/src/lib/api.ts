@@ -52,8 +52,6 @@ function mapInvoke<K extends InvokeChannel>(channel: K, args: Parameters<InvokeM
       return ["panel_set_tab", { tab: args[0] }]
     case "windows:fit":
       return ["windows_fit", { size: args[0] }]
-    case "windows:drag":
-      return ["windows_drag", { step: args[0] }]
     case "transcripts:reveal":
       return ["transcripts_reveal", undefined]
     case "app:open-data-dir":

@@ -1,5 +1,5 @@
 import { LANGUAGES, type LanguageCode } from "../types"
-import { CATALOGS } from "./catalogs"
+import { CATALOG_LOADERS } from "./catalogs"
 
 /**
  * Interface translations. The English text in the code is the key: `t("Start listening")`, with
@@ -9,6 +9,7 @@ import { CATALOGS } from "./catalogs"
  */
 
 let locale: LanguageCode = "en"
+const loaded: Partial<Record<LanguageCode, Record<string, string>>> = {}
 
 /** The interface language: the user's choice, or the system's when it is one Meetingly speaks. */
 export function resolveLocale(preference: LanguageCode | "auto", system: string): LanguageCode {
@@ -25,8 +26,25 @@ export function getLocale(): LanguageCode {
   return locale
 }
 
+export function registerCatalog(code: LanguageCode, catalog: Record<string, string>): void {
+  loaded[code] = catalog
+}
+
+export async function loadLocale(code: LanguageCode): Promise<void> {
+  locale = code
+  if (code === "en" || loaded[code]) return
+  const loader = CATALOG_LOADERS[code]
+  if (!loader) return
+  try {
+    const mod = await loader()
+    loaded[code] = mod.default
+  } catch {
+    loaded[code] = {}
+  }
+}
+
 export function t(text: string, vars?: Record<string, string | number>): string {
-  const translated = CATALOGS[locale]?.[text] || text
+  const translated = loaded[locale]?.[text] || text
   if (!vars) return translated
   return translated.replace(/\{(\w+)\}/g, (match, key: string) => (key in vars ? String(vars[key]) : match))
 }
