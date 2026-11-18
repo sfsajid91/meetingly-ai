@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import type { EventChannel, EventMap } from "@shared/ipc"
-import type { AudioDevices, Meeting, MigrationOutcome, SessionState, SettingsPatch, SettingsView, SuggestionsState, WindowsState } from "@shared/types"
-import { api } from "./api"
+import type { AudioDevices, Meeting, MigrationOutcome, SessionState, SettingsPatch, SettingsView, ShortcutStatusView, SuggestionsState, WindowsState } from "@shared/types"
+import { api, isMac } from "./api"
+import { isEditableTarget, matchInAppShortcut } from "./in-app-shortcuts"
 
 export function useEvent<K extends EventChannel>(channel: K, handler: (payload: EventMap[K]) => void): void {
   const ref = useRef(handler)
@@ -153,4 +154,32 @@ export function useDragToolbar() {
         .catch(() => {})
     }
   }
+}
+
+export function useShortcutStatus(): ShortcutStatusView | null {
+  const [status, setStatus] = useState<ShortcutStatusView | null>(null)
+  useEffect(() => {
+    void api.invoke("shortcuts:status").then(setStatus).catch(() => {})
+  }, [])
+  useEvent("shortcuts:status", setStatus)
+  return status
+}
+
+export function useInAppShortcuts(status: ShortcutStatusView | null): void {
+  const statusRef = useRef(status)
+  statusRef.current = status
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null
+      if (target?.closest("[data-shortcut-recording='true']")) return
+      const action = matchInAppShortcut(event, statusRef.current, isMac, isEditableTarget(event.target))
+      if (!action) return
+      event.preventDefault()
+      event.stopPropagation()
+      void api.invoke("shortcuts:trigger", action).catch(() => {})
+    }
+    window.addEventListener("keydown", onKeyDown, { capture: true })
+    return () => window.removeEventListener("keydown", onKeyDown, { capture: true })
+  }, [])
 }

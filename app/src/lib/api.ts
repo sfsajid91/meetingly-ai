@@ -52,6 +52,12 @@ function mapInvoke<K extends InvokeChannel>(channel: K, args: Parameters<InvokeM
       return ["panel_set_tab", { tab: args[0] }]
     case "windows:fit":
       return ["windows_fit", { size: args[0] }]
+    case "shortcuts:status":
+      return ["shortcuts_status", undefined]
+    case "shortcuts:trigger":
+      return ["shortcuts_trigger", { action: args[0] }]
+    case "shortcuts:configure-system":
+      return ["shortcuts_configure_system", undefined]
     case "transcripts:reveal":
       return ["transcripts_reveal", undefined]
     case "app:open-data-dir":

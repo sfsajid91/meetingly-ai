@@ -32,6 +32,7 @@ import {
   type SettingsPatch,
   type SettingsView,
   type ShortcutAction,
+  type ShortcutStatusView,
   type Shortcuts
 } from "@shared/types"
 import { api, errorText, shortcutLabel } from "@/lib/api"
@@ -861,15 +862,18 @@ export function PromptsSettings({
 
 export function ShortcutsSettings({
   settings,
+  shortcutStatus,
   update
 }: {
   settings: SettingsView
+  shortcutStatus: ShortcutStatusView | null
   update: (patch: SettingsPatch) => Promise<void>
 }) {
   const [draft, setDraft] = useState<Shortcuts>(settings.shortcuts)
   const [recording, setRecording] = useState<ShortcutAction | null>(null)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [configuring, setConfiguring] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -878,6 +882,14 @@ export function ShortcutsSettings({
 
   const validation = validateShortcuts(draft)
   const dirty = (Object.keys(SHORTCUT_LABELS) as ShortcutAction[]).some((k) => draft[k] !== settings.shortcuts[k])
+  const authority = shortcutStatus?.authority
+  const isPortal = authority?.kind === "desktopPortal"
+  const appConflicts =
+    shortcutStatus && shortcutStatus.authority.kind === "appManaged"
+      ? shortcutStatus.actions.filter(
+          (a) => a.binding.kind === "inAppFallback" && a.binding.reason === "globalConflict"
+        )
+      : []
 
   async function save(e: React.FormEvent) {
     e.preventDefault()
@@ -898,16 +910,95 @@ export function ShortcutsSettings({
   async function reset() {
     setDraft(DEFAULT_SHORTCUTS)
     setRecording(null)
-    await update({ shortcuts: DEFAULT_SHORTCUTS })
+    setError(null)
+    try {
+      await update({ shortcuts: DEFAULT_SHORTCUTS })
+    } catch (err) {
+      setError(errorText(err))
+    }
+  }
+
+  async function configureSystem() {
+    setConfiguring(true)
+    setError(null)
+    try {
+      await api.invoke("shortcuts:configure-system")
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setConfiguring(false)
+    }
   }
 
   return (
     <form onSubmit={(e) => void save(e)} noValidate className="space-y-4 text-[13px]">
-      {settings.shortcutConflicts.length > 0 && (
+      {authority?.kind === "desktopPortal" && authority.session === "bound" && (
+        <Alert className="border-sky-400/25 bg-sky-500/10 py-2.5 text-sky-100">
+          <Keyboard className="h-4 w-4 text-sky-300" />
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2 text-xs text-sky-100">
+            <span>
+              Global shortcuts are managed by your desktop portal on Wayland. The fields below set in-app fallback keys and preferred hints.
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              variant="secondary"
+              disabled={configuring}
+              onClick={() => void configureSystem()}
+            >
+              {configuring
+                ? "Opening…"
+                : authority.canConfigure
+                  ? "Configure in System Settings"
+                  : "Rebind global shortcuts"}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {authority?.kind === "desktopPortal" && authority.session === "needsApproval" && (
+        <Alert className="border-amber-400/30 bg-amber-500/10 py-2.5 text-amber-100">
+          <AlertCircle className="h-4 w-4 text-amber-300" />
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2 text-xs text-amber-100">
+            <span>
+              Global shortcuts on Wayland are not enabled yet. In-app shortcuts still work while a Meetingly window is focused.
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              variant="secondary"
+              disabled={configuring}
+              onClick={() => void configureSystem()}
+            >
+              {configuring ? "Opening…" : "Enable global shortcuts"}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {authority?.kind === "desktopPortal" && authority.session === "connecting" && (
+        <Alert className="border-white/15 bg-white/[0.04] py-2.5 text-foreground/90">
+          <Loader2 className="h-4 w-4 animate-spin text-sky-300" />
+          <AlertDescription className="text-xs text-muted-foreground">
+            Connecting to the desktop shortcuts portal…
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {authority?.kind === "inAppOnly" && (
         <Alert className="border-amber-400/30 bg-amber-500/10 py-2.5 text-amber-100">
           <AlertCircle className="h-4 w-4 text-amber-300" />
           <AlertDescription className="text-xs text-amber-100">
-            Could not bind globally: {settings.shortcutConflicts.join(", ")}. Wayland compositors may restrict global hotkeys.
+            {authority.reason} Shortcuts work while a Meetingly window is focused.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {appConflicts.length > 0 && (
+        <Alert className="border-amber-400/30 bg-amber-500/10 py-2.5 text-amber-100">
+          <AlertCircle className="h-4 w-4 text-amber-300" />
+          <AlertDescription className="text-xs text-amber-100">
+            Could not bind globally: {appConflicts.map((a) => SHORTCUT_LABELS[a.action]).join(", ")}. Those shortcuts still work while focused.
           </AlertDescription>
         </Alert>
       )}
@@ -923,18 +1014,47 @@ export function ShortcutsSettings({
         {(Object.keys(SHORTCUT_LABELS) as ShortcutAction[]).map((action) => {
           const rowError = validation.errors[action]
           const isRecording = recording === action
-          const hasConflict = settings.shortcutConflicts.includes(action)
+          const actionStatus = shortcutStatus?.actions.find((a) => a.action === action)
+          const binding = actionStatus?.binding
+          const hasConflict = binding?.kind === "inAppFallback" && binding.reason === "globalConflict"
+          const isUnsupported = binding?.kind === "unsupported"
           return (
             <div key={action} className="space-y-1 py-3">
               <div className="grid grid-cols-[1fr_auto] items-center gap-3">
-                <div className="min-w-0">
+                <div className="min-w-0 space-y-0.5">
                   <div className="truncate text-[13px] font-medium text-foreground" title={SHORTCUT_LABELS[action]}>
                     {SHORTCUT_LABELS[action]}
                   </div>
+                  {binding && (
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                      {binding.kind === "global" && (
+                        <span className="text-emerald-300/90">
+                          {isPortal ? `System global: ${shortcutLabel(binding.displayTrigger)}` : "Global"}
+                        </span>
+                      )}
+                      {binding.kind === "inAppFallback" && (
+                        <span className={cn(hasConflict ? "text-amber-300" : "text-muted-foreground")}>
+                          {hasConflict ? "Conflict, in-app only" : "In-app only"}
+                        </span>
+                      )}
+                      {binding.kind === "unsupported" && (
+                        <span className="text-muted-foreground/80">
+                          {binding.reason === "noPositioningOnWayland" ? "Unavailable on Wayland" : "Invalid"}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div
+                  className="flex items-center gap-1.5"
+                  data-shortcut-recording={isRecording ? "true" : undefined}
+                >
                   <Input
-                    className={cn("h-8 w-[180px] bg-[#0f131a] text-xs", hasConflict && !rowError && "border-amber-400/50")}
+                    className={cn(
+                      "h-8 w-[180px] bg-[#0f131a] text-xs",
+                      hasConflict && !rowError && "border-amber-400/50",
+                      isUnsupported && "opacity-65"
+                    )}
                     value={isRecording ? "Press keys…" : draft[action]}
                     aria-label={SHORTCUT_LABELS[action]}
                     aria-invalid={Boolean(rowError)}
@@ -971,7 +1091,9 @@ export function ShortcutsSettings({
                   </Button>
                   {!rowError && (
                     <Kbd className="hidden h-7 min-w-[64px] justify-center px-2 text-[11px] sm:inline-flex">
-                      {shortcutLabel(draft[action])}
+                      {shortcutLabel(
+                        binding?.kind === "global" && isPortal ? binding.displayTrigger : draft[action]
+                      )}
                     </Kbd>
                   )}
                 </div>

@@ -18,7 +18,8 @@ import {
 import { DEFAULT_SHORTCUTS, type PanelTab } from "@shared/types"
 import { t } from "@shared/i18n"
 import { api, errorText, shortcutLabel } from "@/lib/api"
-import { useDragToolbar, useElapsed, useFitWindow, useSessionState, useSettings, useWindowsState } from "@/lib/hooks"
+import { useDragToolbar, useElapsed, useFitWindow, useInAppShortcuts, useSessionState, useSettings, useShortcutStatus, useWindowsState } from "@/lib/hooks"
+import { actionTrigger } from "@/lib/in-app-shortcuts"
 import { Button } from "@/components/ui/button"
 import { Dot } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
@@ -32,7 +33,13 @@ export function MainWindow() {
   const session = useSessionState()
   const windows = useWindowsState()
   const [settings] = useSettings()
+  const shortcutStatus = useShortcutStatus()
+  useInAppShortcuts(shortcutStatus)
   const KEYS = settings?.shortcuts ?? DEFAULT_SHORTCUTS
+  const toggleAllTrigger = actionTrigger(shortcutStatus, "toggleAll", KEYS.toggleAll)
+  const listenTrigger = actionTrigger(shortcutStatus, "listen", KEYS.listen)
+  const chatTrigger = actionTrigger(shortcutStatus, "chat", KEYS.chat)
+  const screenshotTrigger = actionTrigger(shortcutStatus, "screenshot", KEYS.screenshot)
   const dragToolbar = useDragToolbar()
 
   const [error, setError] = useState<string | null>(null)
@@ -138,8 +145,8 @@ export function MainWindow() {
           variant="ghost"
           size="icon"
           onClick={() => void api.invoke("windows:toggle-all")}
-          aria-label={t("Hide all windows ({shortcut})", { shortcut: shortcutLabel(KEYS.toggleAll) })}
-          title={t("Hide all windows ({shortcut})", { shortcut: shortcutLabel(KEYS.toggleAll) })}
+          aria-label={t("Hide all windows ({shortcut})", { shortcut: shortcutLabel(toggleAllTrigger) })}
+          title={t("Hide all windows ({shortcut})", { shortcut: shortcutLabel(toggleAllTrigger) })}
         >
           <EyeOff className="h-4 w-4" />
         </Button>
@@ -153,7 +160,7 @@ export function MainWindow() {
             disabled={busy !== null}
             onClick={listen}
             className="gap-2 px-3.5 text-[13px] font-semibold"
-            title={t("Start listening ({shortcut})", { shortcut: shortcutLabel(KEYS.listen) })}
+            title={t("Start listening ({shortcut})", { shortcut: shortcutLabel(listenTrigger) })}
           >
             {busy === "listen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
             <span>{t("Listen")}</span>
@@ -240,7 +247,7 @@ export function MainWindow() {
           size="default"
           onClick={() => void api.invoke("panel:toggle", "answers")}
           className="gap-1.5 px-3 text-[13px]"
-          title={t("Answers and chat ({shortcut})", { shortcut: shortcutLabel(KEYS.chat) })}
+          title={t("Answers and chat ({shortcut})", { shortcut: shortcutLabel(chatTrigger) })}
         >
           <MessageSquare className="h-4 w-4" />
           <span>Workspace</span>
@@ -251,8 +258,8 @@ export function MainWindow() {
           size="icon"
           disabled={busy !== null}
           onClick={screenshot}
-          aria-label={t("Analyze screen ({shortcut})", { shortcut: shortcutLabel(KEYS.screenshot) })}
-          title={t("Analyze screen ({shortcut})", { shortcut: shortcutLabel(KEYS.screenshot) })}
+          aria-label={t("Analyze screen ({shortcut})", { shortcut: shortcutLabel(screenshotTrigger) })}
+          title={t("Analyze screen ({shortcut})", { shortcut: shortcutLabel(screenshotTrigger) })}
         >
           {busy === "screenshot" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
         </Button>

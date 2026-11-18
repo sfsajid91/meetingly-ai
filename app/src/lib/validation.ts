@@ -129,8 +129,7 @@ const VALID_MODIFIERS = new Set([
   "meta",
   "alt",
   "option",
-  "shift",
-  "altgr"
+  "shift"
 ])
 
 const VALID_NAMED_KEYS = new Set([
@@ -155,7 +154,6 @@ const VALID_NAMED_KEYS = new Set([
   "end",
   "pageup",
   "pagedown",
-  "plus",
   "minus",
   "equal",
   "comma",
@@ -174,7 +172,9 @@ const VALID_NAMED_KEYS = new Set([
   "numlock",
   "mediaplaypause",
   "mediastop",
+  "mediatracknext",
   "medianexttrack",
+  "mediatrackprevious",
   "mediaprevioustrack",
   "volumeup",
   "volumedown",
@@ -189,20 +189,42 @@ function isValidShortcutKey(part: string): boolean {
   return VALID_NAMED_KEYS.has(lower)
 }
 
+function canonicalModifier(lower: string): string {
+  if (lower === "commandorcontrol" || lower === "cmdorctrl") return "cmdorctrl"
+  if (lower === "control" || lower === "ctrl") return "ctrl"
+  if (lower === "command" || lower === "cmd" || lower === "super" || lower === "meta") return "meta"
+  if (lower === "alt" || lower === "option") return "alt"
+  return lower
+}
+
 export function normalizeShortcutKey(value: string): string {
   const parts = value
     .split("+")
     .map((p) => p.trim())
     .filter(Boolean)
-    .map((part) => {
-      const lower = part.toLowerCase()
-      if (lower === "commandorcontrol" || lower === "cmdorctrl") return "cmdorctrl"
-      if (lower === "control") return "ctrl"
-      if (lower === "command") return "cmd"
-      if (lower === "return") return "enter"
-      return lower
-    })
-  return parts.join("+")
+  if (parts.length === 0) return ""
+  const mods = parts
+    .slice(0, -1)
+    .map((p) => canonicalModifier(p.toLowerCase()))
+    .sort()
+  const rawKey = parts[parts.length - 1].toLowerCase()
+  const key =
+    rawKey === "return"
+      ? "enter"
+      : rawKey === "esc"
+        ? "escape"
+        : rawKey.startsWith("arrow")
+          ? rawKey.slice(5)
+          : rawKey.startsWith("key") && rawKey.length === 4
+            ? rawKey.slice(3)
+            : rawKey.startsWith("digit") && rawKey.length === 6
+              ? rawKey.slice(5)
+              : rawKey === "medianexttrack"
+                ? "mediatracknext"
+                : rawKey === "mediaprevioustrack"
+                  ? "mediatrackprevious"
+                  : rawKey
+  return [...mods, key].join("+")
 }
 
 export function validateAccelerator(value: string): string | null {
@@ -217,7 +239,7 @@ export function validateAccelerator(value: string): string | null {
   for (const mod of modifiers) {
     const lower = mod.toLowerCase()
     if (!VALID_MODIFIERS.has(lower)) return `Unknown modifier "${mod}".`
-    const canon = lower === "commandorcontrol" || lower === "cmdorctrl" ? "cmdorctrl" : lower === "control" ? "ctrl" : lower === "command" ? "cmd" : lower
+    const canon = canonicalModifier(lower)
     if (seenMods.has(canon)) return `Duplicate modifier "${mod}".`
     seenMods.add(canon)
   }

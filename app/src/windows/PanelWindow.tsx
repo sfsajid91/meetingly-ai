@@ -53,13 +53,15 @@ import {
   type SessionState,
   type SettingsPatch,
   type SettingsView,
+  type ShortcutStatusView,
   type SuggestionsState,
   type Utterance
 } from "@shared/types"
 import { t } from "@shared/i18n"
 import { api, errorText, shortcutLabel } from "@/lib/api"
 import { useAudioLevels, useLiveTranscript, type Interim, type TranscriptLine } from "@/lib/capture"
-import { useAudioDevices, useDragToolbar, useElapsed, useEvent, useSessionState, useSettings, useSuggestions } from "@/lib/hooks"
+import { useAudioDevices, useDragToolbar, useElapsed, useEvent, useInAppShortcuts, useSessionState, useSettings, useShortcutStatus, useSuggestions } from "@/lib/hooks"
+import { actionTrigger } from "@/lib/in-app-shortcuts"
 import { buildAnswerTurns, computeAnswerScrollTop, selectHeardUtterance, type AnswerTurn } from "@/lib/turns"
 import { CHAT_MESSAGE_MAX_LENGTH, getSessionReadiness, validateChatMessage } from "@/lib/validation"
 import { cn, copyText } from "@/lib/utils"
@@ -111,6 +113,8 @@ const VIEW_TITLES: Record<PanelTab | SettingsSubTab, string> = {
 export function PanelWindow() {
   const session = useSessionState()
   const [settings, update, setSettings] = useSettings()
+  const shortcutStatus = useShortcutStatus()
+  useInAppShortcuts(shortcutStatus)
   const [tab, setTab] = useState<PanelTab>("answers")
   const [settingsSubTab, setSettingsSubTab] = useState<SettingsSubTab>("general")
   const [busyAction, setBusyAction] = useState<SessionAction | null>(null)
@@ -128,7 +132,7 @@ export function PanelWindow() {
   useEvent("panel:tab", setTab)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") void api.invoke("windows:hide", "chat")
+      if (e.key === "Escape" && !e.defaultPrevented) void api.invoke("windows:hide", "chat")
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
@@ -149,7 +153,13 @@ export function PanelWindow() {
   const handsFree = settings ? settings.autoAnswer !== "off" : false
   const railSuggestions = suggestionsVisible(settings, session.status)
   const needsSetup = settings !== null && (!settings.transcriberId || !settings.brainId)
-  const hasConflicts = Boolean(settings && settings.shortcutConflicts.length > 0)
+  const needsPortalApproval =
+    shortcutStatus?.authority.kind === "desktopPortal" && shortcutStatus.authority.session === "needsApproval"
+  const conflictActions =
+    shortcutStatus?.authority.kind === "appManaged"
+      ? shortcutStatus.actions.filter((a) => a.binding.kind === "inAppFallback" && a.binding.reason === "globalConflict")
+      : []
+  const hasShortcutNotice = needsPortalApproval || conflictActions.length > 0
 
   const activeTranscriber = settings?.providers.find((p) => p.id === settings.transcriberId) ?? null
   const activeBrain = settings?.providers.find((p) => p.id === settings.brainId) ?? null
@@ -285,7 +295,7 @@ export function PanelWindow() {
                   active={tab === "settings" && settingsSubTab === "shortcuts"}
                   icon={<Keyboard className="h-4 w-4" />}
                   label="Shortcuts"
-                  badge={hasConflicts ? <Dot className="h-2 w-2 bg-amber-400" /> : undefined}
+                  badge={hasShortcutNotice ? <Dot className="h-2 w-2 bg-amber-400" /> : undefined}
                   onClick={() => choose("settings", "shortcuts")}
                 />
                 <NavItem
@@ -495,11 +505,35 @@ export function PanelWindow() {
               </Button>
             </div>
 
-            {hasConflicts && settings && (
+            {needsPortalApproval && (
               <div className="flex items-center gap-2 border-b border-amber-400/20 bg-amber-500/10 px-5 py-2 text-xs text-amber-100">
                 <AlertCircle className="h-4 w-4 shrink-0 text-amber-300" />
                 <span className="min-w-0 flex-1 truncate">
-                  {t("Shortcut conflict:")} {settings.shortcutConflicts.map((a) => shortcutLabel(settings.shortcuts[a])).join(", ")}
+                  Global shortcuts need system approval on Wayland. In-app shortcuts still work while focused.
+                </span>
+                <Button
+                  variant="secondary"
+                  size="xs"
+                  onClick={() => void api.invoke("shortcuts:configure-system").catch((err) => setSessionError(errorText(err)))}
+                >
+                  Enable global shortcuts
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="text-amber-100 hover:bg-amber-400/20"
+                  onClick={() => choose("settings", "shortcuts")}
+                >
+                  {t("Settings")}
+                </Button>
+              </div>
+            )}
+
+            {!needsPortalApproval && conflictActions.length > 0 && (
+              <div className="flex items-center gap-2 border-b border-amber-400/20 bg-amber-500/10 px-5 py-2 text-xs text-amber-100">
+                <AlertCircle className="h-4 w-4 shrink-0 text-amber-300" />
+                <span className="min-w-0 flex-1 truncate">
+                  {t("Shortcut conflict:")} {conflictActions.map((a) => shortcutLabel(a.configured)).join(", ")}
                 </span>
                 <Button
                   variant="ghost"
@@ -560,6 +594,7 @@ export function PanelWindow() {
                       listening={session.status !== "idle"}
                       handsFree={handsFree}
                       settings={settings}
+                      shortcutStatus={shortcutStatus}
                       onToggleAutoAnswer={() => void update({ autoAnswer: handsFree ? "off" : "questions" })}
                       onAnswerLengthChange={(answerLength) => void update({ answerLength })}
                       onOpenProviders={openProviders}
@@ -605,6 +640,7 @@ export function PanelWindow() {
               {tab === "settings" && settings && (
                 <SettingsWorkspace
                   settings={settings}
+                  shortcutStatus={shortcutStatus}
                   update={update}
                   onSettingsChange={setSettings}
                   subTab={settingsSubTab}
@@ -868,6 +904,7 @@ function Answers({
   listening,
   handsFree,
   settings,
+  shortcutStatus,
   onToggleAutoAnswer,
   onAnswerLengthChange,
   onOpenProviders
@@ -875,6 +912,7 @@ function Answers({
   listening: boolean
   handsFree: boolean
   settings: SettingsView | null
+  shortcutStatus: ShortcutStatusView | null
   onToggleAutoAnswer: () => void
   onAnswerLengthChange: (answerLength: AnswerLength) => void
   onOpenProviders: () => void
@@ -1110,11 +1148,11 @@ function Answers({
               </div>
               <div className="flex flex-wrap items-center justify-center gap-3 text-xs text-muted-foreground">
                 <span className="inline-flex items-center gap-1.5">
-                  <Kbd>{shortcutLabel(KEYS.listen)}</Kbd>
+                  <Kbd>{shortcutLabel(actionTrigger(shortcutStatus, "listen", KEYS.listen))}</Kbd>
                   <span>{t("Listen")}</span>
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                  <Kbd>{shortcutLabel(KEYS.screenshot)}</Kbd>
+                  <Kbd>{shortcutLabel(actionTrigger(shortcutStatus, "screenshot", KEYS.screenshot))}</Kbd>
                   <span>{t("Screen")}</span>
                 </span>
               </div>
@@ -1271,7 +1309,7 @@ function Answers({
               if (inputError) setInputError(null)
             }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault()
                 send(input)
               }
@@ -1757,6 +1795,7 @@ const PICK = "h-9 w-[220px] shrink-0 bg-[#0f131a] text-[13px]"
 
 function SettingsWorkspace({
   settings,
+  shortcutStatus,
   update,
   onSettingsChange,
   subTab,
@@ -1766,6 +1805,7 @@ function SettingsWorkspace({
   onRefreshDevices
 }: {
   settings: SettingsView
+  shortcutStatus: ShortcutStatusView | null
   update: (patch: SettingsPatch) => Promise<void>
   onSettingsChange: (next: SettingsView) => void
   subTab: SettingsSubTab
@@ -1964,7 +2004,7 @@ function SettingsWorkspace({
         <Suspense fallback={<SettingsSkeleton />}>
           {subTab === "providers" && <ProvidersSettings settings={settings} onSettingsChange={onSettingsChange} />}
           {subTab === "prompts" && <PromptsSettings settings={settings} update={update} />}
-          {subTab === "shortcuts" && <ShortcutsSettings settings={settings} update={update} />}
+          {subTab === "shortcuts" && <ShortcutsSettings settings={settings} shortcutStatus={shortcutStatus} update={update} />}
           {subTab === "meetings" && <MeetingsHistory />}
         </Suspense>
       </div>

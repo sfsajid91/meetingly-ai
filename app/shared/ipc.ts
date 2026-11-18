@@ -16,6 +16,8 @@ import type {
   SessionState,
   SettingsPatch,
   SettingsView,
+  ShortcutAction,
+  ShortcutStatusView,
   SuggestionsState,
   TranscriptEvent,
   TranscriptSegment,
@@ -52,6 +54,9 @@ export interface InvokeMap {
   "panel:toggle": (tab: PanelTab) => void
   "panel:set-tab": (tab: PanelTab) => void
   "windows:fit": (size: { width: number; height: number }) => void
+  "shortcuts:status": () => ShortcutStatusView
+  "shortcuts:trigger": (action: ShortcutAction) => void
+  "shortcuts:configure-system": () => void
   "transcripts:reveal": () => void
   "app:open-data-dir": () => void
   "app:quit": () => void
@@ -86,6 +91,7 @@ export interface EventMap {
   "windows:state": WindowsState
   "panel:tab": PanelTab
   "settings:changed": SettingsView
+  "shortcuts:status": ShortcutStatusView
   "chat:message": ChatMessage
   "chat:chunk": ChatChunk
   "chat:busy": boolean

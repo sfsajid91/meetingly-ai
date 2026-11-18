@@ -143,6 +143,45 @@ export const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   moveDown: "Move toolbar down"
 }
 
+export interface KeyChord {
+  ctrlOrMeta: boolean
+  ctrl: boolean
+  meta: boolean
+  alt: boolean
+  shift: boolean
+  code: string
+}
+
+export type PortalSessionView = "connecting" | "bound" | "needsApproval"
+
+export type BindingAuthorityView =
+  | { kind: "appManaged" }
+  | { kind: "desktopPortal"; session: PortalSessionView; canConfigure: boolean }
+  | { kind: "inAppOnly"; reason: string }
+
+export type FallbackReason =
+  | "globalConflict"
+  | "invalidAccelerator"
+  | "portalNotBound"
+  | "portalUnavailable"
+  | "noPositioningOnWayland"
+
+export type ActionBindingView =
+  | { kind: "global"; displayTrigger: string }
+  | { kind: "inAppFallback"; chord: KeyChord; displayTrigger: string; reason: FallbackReason }
+  | { kind: "unsupported"; reason: FallbackReason }
+
+export interface ActionStatusView {
+  action: ShortcutAction
+  configured: string
+  binding: ActionBindingView
+}
+
+export interface ShortcutStatusView {
+  authority: BindingAuthorityView
+  actions: ActionStatusView[]
+}
+
 export type ProviderRole = "transcription" | "brain"
 export type ProviderKind = "deepgram" | "openai-compatible"
 
@@ -203,7 +242,6 @@ export interface SettingsView {
   providers: ProviderView[]
   transcriberId: string | null
   brainId: string | null
-  shortcutConflicts: ShortcutAction[]
   readOnlyReason: string | null
 }
 
