@@ -238,6 +238,8 @@ pub struct Settings {
     pub prompts: Vec<Prompt>,
     pub active_prompt_id: Option<String>,
     pub shortcuts: Shortcuts,
+    #[serde(default)]
+    pub portal_shortcuts_prompted: bool,
     pub providers: Vec<ProviderRecord>,
     pub transcriber_id: Option<String>,
     pub brain_id: Option<String>,
@@ -262,6 +264,7 @@ impl Default for Settings {
             active_prompt_id: Some(prompt.id.clone()),
             prompts: vec![prompt],
             shortcuts: Shortcuts::default(),
+            portal_shortcuts_prompted: false,
             providers: Vec::new(),
             transcriber_id: None,
             brain_id: None,
@@ -344,7 +347,6 @@ pub struct SettingsView {
     pub providers: Vec<ProviderView>,
     pub transcriber_id: Option<String>,
     pub brain_id: Option<String>,
-    pub shortcut_conflicts: Vec<String>,
     /// Set when the settings file is from a newer build and changes cannot be saved.
     pub read_only_reason: Option<String>,
 }
@@ -392,7 +394,6 @@ pub struct SettingsStore {
 
 struct State {
     settings: Settings,
-    shortcut_conflicts: Vec<String>,
     read_only_reason: Option<String>,
 }
 
@@ -439,14 +440,19 @@ impl SettingsStore {
             secrets,
             state: Mutex::new(State {
                 settings,
-                shortcut_conflicts: Vec::new(),
                 read_only_reason,
             }),
         })
     }
 
-    pub fn set_shortcut_conflicts(&self, conflicts: Vec<String>) {
-        self.lock().shortcut_conflicts = conflicts;
+    pub fn mark_portal_shortcuts_prompted(&self) -> Result<(), String> {
+        if self.get().portal_shortcuts_prompted {
+            return Ok(());
+        }
+        self.commit(|s| {
+            s.portal_shortcuts_prompted = true;
+            Ok(())
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -490,7 +496,6 @@ impl SettingsStore {
                 .collect(),
             transcriber_id: s.transcriber_id.clone(),
             brain_id: s.brain_id.clone(),
-            shortcut_conflicts: state.shortcut_conflicts.clone(),
             read_only_reason: state.read_only_reason.clone(),
         }
     }
@@ -559,6 +564,7 @@ impl SettingsStore {
                 s.active_prompt_id = Some(v);
             }
             if let Some(v) = patch.shortcuts {
+                crate::shortcuts::validate_shortcuts(&v)?;
                 s.shortcuts = v;
             }
             Ok(())
@@ -912,5 +918,31 @@ mod tests {
     fn patch_rejects_unknown_fields() {
         let error = serde_json::from_str::<SettingsPatch>(r#"{ "providers": [] }"#).unwrap_err();
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn portal_shortcuts_prompted_persists_and_shortcuts_patch_validates() {
+        let dir = TempDir::new();
+        let secrets = Arc::new(MemorySecrets::default());
+        let first = SettingsStore::open(dir.path(), secrets.clone()).unwrap();
+        assert!(!first.get().portal_shortcuts_prompted);
+        first.mark_portal_shortcuts_prompted().unwrap();
+        assert!(first.get().portal_shortcuts_prompted);
+        drop(first);
+
+        let second = SettingsStore::open(dir.path(), secrets).unwrap();
+        assert!(second.get().portal_shortcuts_prompted);
+
+        let bad_dup = Shortcuts {
+            listen: "CmdOrCtrl+B".into(),
+            ..Shortcuts::default()
+        };
+        assert!(second.update(SettingsPatch { shortcuts: Some(bad_dup), ..Default::default() }).is_err());
+
+        let bad_mod = Shortcuts {
+            listen: "AltGr+L".into(),
+            ..Shortcuts::default()
+        };
+        assert!(second.update(SettingsPatch { shortcuts: Some(bad_mod), ..Default::default() }).is_err());
     }
 }

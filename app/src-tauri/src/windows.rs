@@ -38,12 +38,15 @@ struct Inner {
 }
 
 pub struct WindowManager {
+    can_reposition: bool,
     inner: Mutex<Inner>,
 }
 
 impl WindowManager {
     pub fn new(stealth: bool) -> Self {
+        let can_reposition = !crate::shortcuts::DisplayServer::detect().is_wayland();
         Self {
+            can_reposition,
             inner: Mutex::new(Inner {
                 stealth,
                 quitting: false,
@@ -264,7 +267,8 @@ impl WindowManager {
             self.inner.lock().unwrap_or_else(|e| e.into_inner()).restore_set = None;
         }
         let Some(main) = app.get_webview_window("main") else { return };
-        if let Ok(Some(monitor)) = main.primary_monitor()
+        if self.can_reposition
+            && let Ok(Some(monitor)) = main.primary_monitor()
             && let Ok(size) = main.outer_size()
         {
             let m_pos = monitor.position();
@@ -275,10 +279,14 @@ impl WindowManager {
             let _ = main.set_position(PhysicalPosition::new(x, y));
         }
         let _ = main.show();
+        let _ = main.set_focus();
         self.layout_chat(app);
     }
 
     pub fn move_main(&self, app: &AppHandle, dx_steps: i32, dy_steps: i32) {
+        if !self.can_reposition {
+            return;
+        }
         let Some(main) = app.get_webview_window("main") else { return };
         if let Ok(pos) = main.outer_position() {
             let _ = main.set_position(PhysicalPosition::new(pos.x + dx_steps * MOVE_STEP, pos.y + dy_steps * MOVE_STEP));
@@ -327,6 +335,9 @@ impl WindowManager {
     }
 
     pub fn layout_chat(&self, app: &AppHandle) {
+        if !self.can_reposition {
+            return;
+        }
         let Some(main) = app.get_webview_window("main") else { return };
         let Some(chat) = app.get_webview_window("chat") else { return };
         let (Ok(m_pos), Ok(m_size), Ok(c_size)) = (main.outer_position(), main.outer_size(), chat.outer_size()) else {

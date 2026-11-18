@@ -24,7 +24,7 @@ use reports::ReportGenerator;
 use serde::Deserialize;
 use session::{SessionEvent, SessionManager, SessionState, SessionStatus, Utterance};
 use settings::{ProviderInput, ProviderKind, ProviderRole, SettingsPatch, SettingsStore, SettingsView};
-use shortcuts::ShortcutManager;
+use shortcuts::{ActionId, ShortcutService, ShortcutStatusView};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use suggestions::{SuggestionService, SuggestionsState};
@@ -71,15 +71,17 @@ fn changed(app: &AppHandle, store: &SettingsStore) -> SettingsView {
     view
 }
 
-fn sync_after_settings(app: &AppHandle) {
+fn sync_after_settings(app: &AppHandle, shortcuts_changed: bool) {
     let store = app.state::<Settings>();
     let windows = app.state::<Arc<WindowManager>>();
     let session = app.state::<Arc<SessionManager>>();
-    let shortcuts = app.state::<Arc<ShortcutManager>>();
+    let shortcuts = app.state::<Arc<ShortcutService>>();
 
     let s = store.get();
     windows.set_stealth(app, s.stealth);
-    shortcuts.register_all(app);
+    if shortcuts_changed {
+        shortcuts.sync_from_settings(app);
+    }
     session.sync_engine();
 
     let view = store.view();
@@ -161,8 +163,9 @@ fn settings_get(store: State<'_, Settings>) -> SettingsView {
 
 #[tauri::command]
 fn settings_update(app: AppHandle, store: State<'_, Settings>, patch: SettingsPatch) -> Result<SettingsView, String> {
+    let shortcuts_changed = patch.shortcuts.is_some();
     store.update(patch)?;
-    sync_after_settings(&app);
+    sync_after_settings(&app, shortcuts_changed);
     Ok(store.view())
 }
 
@@ -171,7 +174,7 @@ async fn provider_save(app: AppHandle, store: State<'_, Settings>, input: Provid
     let store_arc = store.inner().clone();
     let worker = store_arc.clone();
     blocking(move || worker.save_provider(input)).await?;
-    sync_after_settings(&app);
+    sync_after_settings(&app, false);
     Ok(store_arc.view())
 }
 
@@ -180,7 +183,7 @@ async fn provider_remove(app: AppHandle, store: State<'_, Settings>, id: String)
     let store_arc = store.inner().clone();
     let worker = store_arc.clone();
     let result = blocking(move || worker.remove_provider(&id)).await;
-    sync_after_settings(&app);
+    sync_after_settings(&app, false);
     result.map(|()| store_arc.view())
 }
 
@@ -192,7 +195,7 @@ fn provider_select(
     id: Option<String>,
 ) -> Result<SettingsView, String> {
     store.select_provider(role, id)?;
-    sync_after_settings(&app);
+    sync_after_settings(&app, false);
     Ok(store.view())
 }
 
@@ -383,6 +386,21 @@ fn windows_fit(app: AppHandle, window: WebviewWindow, windows: State<'_, Arc<Win
 }
 
 #[tauri::command]
+fn shortcuts_status(shortcuts: State<'_, Arc<ShortcutService>>) -> ShortcutStatusView {
+    shortcuts.status()
+}
+
+#[tauri::command]
+fn shortcuts_trigger(app: AppHandle, shortcuts: State<'_, Arc<ShortcutService>>, action: ActionId) {
+    shortcuts.trigger_in_app(&app, action);
+}
+
+#[tauri::command]
+fn shortcuts_configure_system(shortcuts: State<'_, Arc<ShortcutService>>) -> Result<(), String> {
+    shortcuts.configure_system()
+}
+
+#[tauri::command]
 fn transcripts_reveal(session: State<'_, Arc<SessionManager>>, paths: State<'_, AppPaths>) {
     let dir = session.transcript_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -408,17 +426,19 @@ fn app_quit(app: AppHandle, windows: State<'_, Arc<WindowManager>>, session: Sta
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .manage(LlmClient::new())
-        .plugin(
+    let mut builder = tauri::Builder::default().manage(LlmClient::new());
+    if ShortcutService::uses_legacy_plugin() {
+        builder = builder.plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if let Some(mgr) = app.try_state::<Arc<ShortcutManager>>() {
-                        mgr.handle_event(app, shortcut, event.state);
+                    if let Some(svc) = app.try_state::<Arc<ShortcutService>>() {
+                        svc.handle_legacy_event(app, shortcut, event.state);
                     }
                 })
                 .build(),
-        )
+        );
+    }
+    builder
         .on_window_event(|window, event| match event {
             WindowEvent::CloseRequested { api, .. }
                 if window.label() == "main" =>
@@ -544,8 +564,8 @@ pub fn run() {
                 }
             });
 
-            let shortcuts = ShortcutManager::new(store.clone(), windows.clone(), session.clone(), chat.clone());
-            shortcuts.register_all(app.handle());
+            let shortcuts = ShortcutService::new(store.clone(), windows.clone(), session.clone(), chat.clone());
+            shortcuts.start(app.handle());
             windows.init_main(app.handle());
             let _ = tray::setup_tray(app.handle(), windows.clone(), transcript_dir, dir.clone());
 
@@ -622,6 +642,9 @@ pub fn run() {
             panel_toggle,
             panel_set_tab,
             windows_fit,
+            shortcuts_status,
+            shortcuts_trigger,
+            shortcuts_configure_system,
             transcripts_reveal,
             app_open_data_dir,
             app_quit
